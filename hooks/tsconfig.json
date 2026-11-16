@@ -1,0 +1,4 @@
+{
+  "//": "The mod's own type-check: tsc -p hooks. The root tsconfig.json is the hub's (Bun) and excludes hooks/ and types/. ../.claude-plugin/types/ is laid by Claude Code whenever it loads this folder as a --plugin-dir (or CLAUDE_CODE_PLUGIN_DIRS) folder it hot-reloads; its tsconfig includes ../../hooks and ../../types.",
+  "extends": "../.claude-plugin/types/tsconfig.json"
+}

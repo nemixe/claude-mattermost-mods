@@ -1,0 +1,825 @@
+#!/usr/bin/env bun
+/**
+ * mmhub — control the Mattermost hub.
+ *
+ *   mmhub start [--json]            start the daemon (detached; logs to hub.log); restarts one whose heartbeat stopped
+ *   mmhub stop [--json]             stop it (sessions keep running; adopted at next start)
+ *   mmhub status [--json]           hub, workspaces and sessions
+ *   mmhub logs [-n N] [-f]          hub log
+ *   mmhub doctor                    check the setup
+ *   mmhub session <stop|wake|pin|unpin> <key> [--json]
+ *   mmhub session restart <key|all|workers|routers> [--now] [--json]
+ *                                   restart with current settings, keeping the conversation:
+ *                                   after the current turn ends (default), or right away (--now)
+ *   mmhub ws list | create <name> [description] | bind <ws> <channel-id> | unbind <channel-id> | show <name>
+ *   mmhub ws template               path of <workspacesDir>/workspace-template (created if missing)
+ *   mmhub ws trigger <ws> [mention|laya|inherit]
+ *                                   which replies in the bot's threads reach it: all (mention), or in
+ *                                   threads it follows, those Laya judges meant for it (TRIGGER.md rules)
+ *   mmhub repo add <ws> <path|git-url> [--name <n>] | rm <ws> <name>
+ *   mmhub lookup user <username> | lookup channel <team> <channel>   Mattermost ids
+ *   mmhub agent install|uninstall   (macOS) start the hub at login via launchd
+ *   mmhub reload                    re-read config.json (sessions move if their provider changed)
+ *
+ * Providers (the login or API each workspace's sessions run on, in fallback order):
+ *   mmhub provider list                          providers, their state, each workspace's chain and active one
+ *   mmhub provider add <name> <kind> [--env K=V]… [--config-dir D] [--router-model M] [--worker-model M] [--channels]
+ *                                   kinds: login | oauth-token | api-key | gateway | bedrock | vertex | foundry
+ *   mmhub provider login <name>                  the command you run yourself to sign a login provider in
+ *   mmhub provider secret <name> <VAR> [--unset] store a secret, read from stdin (hidden at a terminal)
+ *   mmhub provider check <name>                  validate it and ask `claude auth status` with its settings
+ *   mmhub provider use <workspace|--hub> <name>… | <workspace> --inherit
+ *                                                set the fallback chain ("default" = the hub's own login)
+ *   mmhub provider reset <name>                  forget its failures, so it is tried again now
+ *   mmhub provider rm <name> [--purge]           remove it (--purge: its login config dir too)
+ *
+ * With --json, prints one line {"ok":boolean,"message":string} (the panel mod reads it).
+ */
+
+import { spawn as nodeSpawn } from 'child_process'
+import { existsSync, mkdirSync, openSync, readFileSync, statSync, writeFileSync } from 'fs'
+import { join } from 'path'
+import { roundTrip, type HubMsg } from './shared/ipc'
+import { DEFAULT_TRIGGER_MD, layaReady, loadTrigger, triggerFile } from './hub/laya'
+import { paths, ROOT } from './shared/paths'
+import { SESSION_KEY_RE, type HubSnapshot, type SessionSnapshot } from './shared/snapshot'
+import { errMsg, fmtAge, isPidAlive, readEnvFile, readJson, writeJsonAtomic } from './shared/util'
+import { Database } from 'bun:sqlite'
+import { loadConfig } from './hub/config'
+import { routerPersona } from './hub/prompts'
+import {
+  buildLaunch, chooseProvider, configDirOf, cooling, DEFAULT_PROVIDER, deleteSecret, ensureConfigDir, HUB_LIST, isKind, KINDS, loadProviders,
+  loginCommand, loginState, PROVIDER_KINDS, providerChain, removeProviderFiles, saveProviders, secretNames, unusableReason, validateDef, writeSecret,
+  type Health, type ProviderDef,
+} from './hub/providers'
+import { PROVIDER_UNSET } from './hub/spawn'
+import { addRepo, bindChannel, channelsOf, effective, setWorkspaceTrigger, createWorkspace, ensureTemplate, listWorkspaces, loadBindings, loadWorkspace, removeRepo, setWorkspaceProviders, TEMPLATE_DIR, unbindChannel, validName } from './hub/workspaces'
+
+const argv = process.argv.slice(2)
+const json = argv.includes('--json')
+const restartNowFlag = argv.includes('--now')
+const args = argv.filter(a => a !== '--json' && a !== '--now')
+const p = paths()
+
+function out(ok: boolean, message: string): never {
+  if (json) process.stdout.write(JSON.stringify({ ok, message }) + '\n')
+  else (ok ? process.stdout : process.stderr).write(message + '\n')
+  process.exit(ok ? 0 : 1)
+}
+
+async function controlOp(op: string, a: Record<string, unknown> = {}, timeoutMs = 45_000): Promise<Extract<HubMsg, { t: 'result' }>> {
+  const r = await roundTrip(p.sock, { t: 'control', id: 1, op, args: a }, timeoutMs)
+  if (r.t !== 'result') throw new Error('unexpected answer from the hub')
+  return r
+}
+
+async function hubRunning(): Promise<boolean> {
+  if (!existsSync(p.sock)) return false
+  try {
+    return (await controlOp('ping', {}, 3000)).ok
+  } catch {
+    return false
+  }
+}
+
+function lockPid(): number | undefined {
+  try {
+    const pid = parseInt(readFileSync(p.lock, 'utf8'), 10)
+    return isPidAlive(pid) ? pid : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function tail(file: string, n: number): string {
+  try {
+    return readFileSync(file, 'utf8').split('\n').filter(Boolean).slice(-n).join('\n')
+  } catch {
+    return ''
+  }
+}
+
+// ------------------------------------------------------------------ commands
+
+/** The panel counts a hub as down past this heartbeat age (hooks/panel.tsx STALE_MS). */
+const HEARTBEAT_STALE_MS = 15_000
+
+/** How old status.json's heartbeat is (undefined: no status.json). */
+function heartbeatAge(): number | undefined {
+  const at = readJson<HubSnapshot | undefined>(p.status, () => undefined)?.hub?.heartbeatAt
+  return typeof at === 'number' && at > 0 ? Date.now() - at : undefined
+}
+
+/** Ask the hub to stop; past 8 s, SIGTERM, then SIGKILL. Returns whether it is gone. */
+async function stopHub(): Promise<boolean> {
+  const gone = async (ms: number) => {
+    const end = Date.now() + ms
+    while (Date.now() < end && lockPid()) await Bun.sleep(200)
+    return !lockPid()
+  }
+  try {
+    await controlOp('shutdown', {}, 5000)
+  } catch {}
+  if (await gone(8000)) return true
+  for (const sig of ['SIGTERM', 'SIGKILL'] as const) {
+    const pid = lockPid()
+    if (!pid) return true
+    try { process.kill(pid, sig) } catch {}
+    if (await gone(3000)) return true
+  }
+  return false
+}
+
+async function start(): Promise<never> {
+  let restarted = ''
+  const running = await hubRunning()
+  if (running) {
+    const age = heartbeatAge()
+    if (age === undefined || age <= HEARTBEAT_STALE_MS) out(true, `hub already running (pid ${lockPid() ?? '?'})`)
+    restarted = `its heartbeat had stopped ${fmtAge(age)} ago`
+  }
+  const env = readEnvFile(p.env)
+  if (!env.MATTERMOST_URL || !env.MATTERMOST_BOT_TOKEN) {
+    out(false, `${restarted ? `hub runs but ${restarted}; not restarting it: ` : ''}not configured: ${p.env} needs MATTERMOST_URL and MATTERMOST_BOT_TOKEN — run /mattermost-hub:configure`)
+  }
+  if (running) {
+    // It answers, but its heartbeat stopped (seen after the machine slept): the panel shows it down. Restart it;
+    // sessions keep running in tmux and the new hub adopts them.
+    const pid = lockPid()
+    if (!(await stopHub())) out(false, `hub pid ${pid ?? '?'} runs but ${restarted}, and it did not stop — kill it and run mmhub start`)
+  }
+  mkdirSync(p.dir, { recursive: true, mode: 0o700 })
+  const logSize = existsSync(p.log) ? statSync(p.log).size : 0
+  const fd = openSync(p.log, 'a', 0o600)
+  const child = nodeSpawn(process.execPath, [join(ROOT, 'src', 'hub', 'main.ts')], {
+    detached: true,
+    stdio: ['ignore', fd, fd],
+    cwd: p.dir,
+    env: process.env,
+  })
+  let exited: number | null = null
+  child.on('exit', code => { exited = code ?? 0 })
+  child.unref()
+  const end = Date.now() + 20_000
+  while (Date.now() < end) {
+    await Bun.sleep(400)
+    if (exited !== null) break
+    if (await hubRunning()) {
+      // Wait for "ready" (Mattermost connected) or a failure in the log.
+      const logNow = readFileSync(p.log, 'utf8').slice(logSize)
+      if (/mmhub hub: ready/.test(logNow)) out(true, restarted ? `hub restarted (pid ${child.pid}): ${restarted}` : `hub started (pid ${child.pid})`)
+    }
+  }
+  const fresh = readFileSync(p.log, 'utf8').slice(logSize).trim().split('\n').slice(-3).join(' | ')
+  if (exited !== null) out(false, `hub exited: ${fresh || `code ${exited}`}`)
+  if (await hubRunning()) out(true, `hub ${restarted ? 'restarted' : 'started'} (pid ${child.pid}), still connecting to Mattermost${restarted ? `: ${restarted}` : ''}`)
+  out(false, `hub did not come up in 20s: ${fresh}`)
+}
+
+async function stop(): Promise<never> {
+  if (await hubRunning()) {
+    if (await stopHub()) out(true, 'hub stopped (tmux sessions keep running)')
+    out(false, `hub pid ${lockPid() ?? '?'} did not stop`)
+  }
+  const pid = lockPid()
+  if (pid) {
+    process.kill(pid, 'SIGTERM')
+    out(true, `sent SIGTERM to hub pid ${pid}`)
+  }
+  out(true, 'hub is not running')
+}
+
+/** "acme-key (fallback) · chain acme-login ✗ auth, back in 42m → acme-key → default" */
+function providerSummary(p: NonNullable<HubSnapshot['workspaces'][number]['provider']>, now: number): string {
+  const chain = p.chain.map(c => {
+    const why = c.unusable ? ` ✗ ${c.unusable}` : c.coolingUntil ? ` ⏸ ${c.reason ?? 'resting'}, back in ${fmtAge(c.coolingUntil - now)}` : ''
+    return `${c.name === p.active ? '●' : ''}${c.name}${why}`
+  }).join(' → ')
+  const state = !p.healthy ? ' (every provider failed: waiting)' : p.fallback ? ' (fallback)' : ''
+  return `${p.active}${state}${p.chain.length > 1 ? ` · chain ${chain}` : ''}`
+}
+
+function sessionRow(s: SessionSnapshot, now: number): string {
+  const icon = s.role === 'router' ? '🧭' : '🛠'
+  let state: string = s.status
+  if (s.status === 'idle') state = `idle ${fmtAge(now - s.lastActiveAt)}${s.closesAt ? ` · closes in ${fmtAge(s.closesAt - now)}` : ''}`
+  if (s.status === 'stopped' && s.closedAt) state = `stopped ${fmtAge(now - s.closedAt)} ago${s.closeReason ? ` (${s.closeReason})` : ''}`
+  const flags = [
+    s.pinned ? '📌' : '', s.attached ? '👁' : '', s.pendingPermissions ? `🔐${s.pendingPermissions}` : '', s.queuedTasks ? `${s.queuedTasks} queued` : '',
+    s.restartPending ? '↻ restart pending' : '', s.retryAt ? `⏳ retry in ${fmtAge(s.retryAt - now)}` : '',
+  ].filter(Boolean).join(' ')
+  return `  ${icon} ${s.key.padEnd(11)} ${state.padEnd(30)} ${s.model.padEnd(7)} ${s.label}${flags ? `  ${flags}` : ''}`
+}
+
+async function status(): Promise<never> {
+  let snap: HubSnapshot | undefined
+  let up = false
+  try {
+    const r = await controlOp('status', {}, 5000)
+    snap = r.data as HubSnapshot
+    up = true
+  } catch {
+    snap = readJson<HubSnapshot | undefined>(p.status, () => undefined)
+  }
+  if (json) out(up, up ? `hub running (pid ${snap?.hub.pid}), ${snap?.caps.liveRouters ?? 0} routers, ${snap?.caps.liveWorkers ?? 0} workers live` : 'hub is not running')
+  const now = Date.now()
+  const lines: string[] = []
+  if (!snap) out(false, 'hub is not running and has never written status.json')
+  lines.push(`hub ${up ? `● running pid ${snap.hub.pid} v${snap.hub.version}, up ${fmtAge(now - snap.hub.startedAt)}` : '○ down (last snapshot below)'}`)
+  const age = heartbeatAge()
+  if (up && age !== undefined && age > HEARTBEAT_STALE_MS) {
+    lines.push(`  ⚠ but status.json's heartbeat stopped ${fmtAge(age)} ago (the panel shows the hub down): run mmhub start to restart it`)
+  }
+  lines.push(`mattermost ${snap.mattermost.connected ? '●' : '○'} ${snap.mattermost.url}${snap.mattermost.bot ? ` as @${snap.mattermost.bot}` : ''}`)
+  lines.push(`live: routers ${snap.caps.liveRouters}/${snap.caps.maxLiveRouters}, workers ${snap.caps.liveWorkers}/${snap.caps.maxLiveWorkers}`)
+  for (const w of snap.workspaces) {
+    lines.push('', `workspace ${w.name} — ${w.path}`)
+    lines.push(`  channels: ${w.channels.map(c => c.name).join(', ') || 'none'} · repos: ${w.repos.map(r => r.name).join(', ') || 'none'}`)
+    if (w.provider) lines.push(`  provider: ${providerSummary(w.provider, now)}`)
+    for (const s of w.sessions) lines.push(sessionRow(s, now) + (s.provider && w.provider && s.provider !== w.provider.active ? `  (on ${s.provider})` : ''))
+  }
+  lines.push('', `attach: tmux -L ${loadConfig(p.config).tmuxSocket} attach -t <mmr-…|mmw-…>`)
+  console.log(lines.join('\n'))
+  process.exit(up ? 0 : 1)
+}
+
+async function logs(): Promise<never> {
+  const nIdx = args.indexOf('-n')
+  const n = nIdx >= 0 ? parseInt(args[nIdx + 1] ?? '100', 10) : 100
+  if (args.includes('-f')) {
+    const t = nodeSpawn('tail', ['-n', String(n), '-f', p.log], { stdio: 'inherit' })
+    await new Promise(r => t.on('exit', r))
+    process.exit(0)
+  }
+  console.log(tail(p.log, n) || `(no log yet at ${p.log})`)
+  process.exit(0)
+}
+
+async function run(cmd: string[]): Promise<string> {
+  try {
+    const pr = Bun.spawn(cmd, { stdout: 'pipe', stderr: 'pipe' })
+    const [o, e] = await Promise.all([new Response(pr.stdout).text(), new Response(pr.stderr).text(), pr.exited])
+    return (o + e).trim().split('\n')[0] ?? ''
+  } catch (err) {
+    return `error: ${errMsg(err)}`
+  }
+}
+
+async function doctor(): Promise<never> {
+  const cfg = loadConfig(p.config)
+  const PATH = cfg.path ?? process.env.PATH ?? ''
+  const rows: [boolean, string][] = []
+  const check = (ok: boolean, msg: string) => rows.push([ok, msg])
+  check(true, `bun ${Bun.version} (${process.execPath})`)
+  const claude = cfg.claudeBin ?? Bun.which('claude', { PATH })
+  check(!!claude, claude ? `claude ${await run([claude, '--version'])} (${claude})` : 'claude not found on PATH (set claudeBin in config.json)')
+  const tmux = Bun.which('tmux', { PATH })
+  check(!!tmux, tmux ? `${await run([tmux, '-V'])} (${tmux})` : 'tmux not found on PATH')
+  const git = cfg.gitBin ?? Bun.which('git', { PATH })
+  check(!!git, git ? `${await run([git, '--version'])}` : 'git not found (worktrees need it)')
+  check(existsSync(p.dir), `state dir ${p.dir}`)
+  const env = readEnvFile(p.env)
+  check(!!env.MATTERMOST_URL, `MATTERMOST_URL ${env.MATTERMOST_URL ?? 'missing'}`)
+  check(!!env.MATTERMOST_BOT_TOKEN, `MATTERMOST_BOT_TOKEN ${env.MATTERMOST_BOT_TOKEN ? 'set' : 'missing'}`)
+  if (env.MATTERMOST_URL && env.MATTERMOST_BOT_TOKEN) {
+    try {
+      const res = await fetch(`${env.MATTERMOST_URL.replace(/\/+$/, '')}/api/v4/users/me`, { headers: { Authorization: `Bearer ${env.MATTERMOST_BOT_TOKEN}` } })
+      const me = (await res.json()) as { username?: string; message?: string }
+      check(res.ok, res.ok ? `bot account @${me.username}` : `Mattermost refused the token: HTTP ${res.status} ${me.message ?? ''}`)
+    } catch (err) {
+      check(false, `Mattermost unreachable: ${errMsg(err)}`)
+    }
+  }
+  const access = readJson<{ allowFrom?: string[]; dmPolicy?: string }>(p.access, () => ({}))
+  check((access.allowFrom ?? []).length > 0, `owners in access.json: ${(access.allowFrom ?? []).length} (dmPolicy ${access.dmPolicy ?? 'pairing'})`)
+  check(existsSync(cfg.workspacesDir), `workspaces dir ${cfg.workspacesDir}`)
+  try {
+    check(true, `workspace template ${ensureTemplate(cfg)} (copied into new workspaces)`)
+  } catch (err) {
+    check(false, `workspace template: ${errMsg(err)}`)
+  }
+  const bindings = loadBindings(p.bindings)
+  for (const [ch, ws] of Object.entries(bindings)) check(!!loadWorkspace(cfg, ws), `channel ${ch} → workspace ${ws}`)
+  if (!Object.keys(bindings).length) check(true, 'no channels bound yet (mention the bot in a channel, or `mmhub ws bind`)')
+  check(true, `models: router ${cfg.routerModel}, worker ${cfg.workerModel}; idle close: router ${cfg.idleMinutes.router}m, worker ${cfg.idleMinutes.worker}m`)
+  const defs = loadProviders(p.dir)
+  for (const [name, def] of Object.entries(defs)) {
+    const errs = validateDef(name, def)
+    const why = errs.length ? errs.join('; ') : unusableReason(p.dir, name, def)
+    check(!why, `provider ${name} (${def.kind})${why ? `: ${why}${why === 'not signed in' ? ` — mmhub provider login ${name}` : ''}` : ': ready'}`)
+  }
+  for (const w of listWorkspaces(cfg)) {
+    const chain = providerChain(cfg.providers, w.providers)
+    const missing = chain.filter(n => n !== DEFAULT_PROVIDER && !defs[n])
+    if (missing.length || chain.length > 1 || chain[0] !== DEFAULT_PROVIDER) {
+      check(!missing.length, `workspace ${w.name} providers: ${chain.join(' → ')}${missing.length ? ` (not defined: ${missing.join(', ')})` : ''}`)
+    }
+  }
+  const byLaya = listWorkspaces(cfg).filter(w => effective(cfg, w).trigger === 'laya').map(w => w.name)
+  if (byLaya.length) {
+    const why = await layaReady(cfg.laya)
+    check(!why, `Laya (${cfg.laya.model} at ${cfg.laya.url}) for ${byLaya.join(', ')}: ${why ?? 'ready'}`)
+  }
+  const up = await hubRunning()
+  check(true, `hub ${up ? `running (pid ${lockPid() ?? '?'})` : 'not running — mmhub start'}`)
+  for (const [ok, msg] of rows) console.log(`${ok ? '✓' : '✗'} ${msg}`)
+  process.exit(rows.every(([ok]) => ok) ? 0 : 1)
+}
+
+async function session(): Promise<never> {
+  const [, op, key] = args
+  const usage = 'usage: mmhub session <stop|wake|pin|unpin> <key> | mmhub session restart <key|all|workers|routers> [--now]'
+  if (!op || !['stop', 'wake', 'restart', 'pin', 'unpin'].includes(op)) out(false, usage)
+  const group = op === 'restart' && (key === 'all' || key === 'workers' || key === 'routers')
+  if (!key || (!group && !SESSION_KEY_RE.test(key))) out(false, `malformed session key: ${String(key).slice(0, 40)}`)
+  if (!(await hubRunning())) out(false, 'hub is not running — start it first')
+  const r = await controlOp('session', { op, key, now: restartNowFlag }, group ? 300_000 : 90_000)
+  out(r.ok, r.text ?? r.error ?? (r.ok ? 'ok' : 'failed'))
+}
+
+async function ws(): Promise<never> {
+  const cfg = loadConfig(p.config)
+  const [, sub, a1, ...rest] = args
+  const tpl = ensureTemplate(cfg)
+  switch (sub) {
+    case 'template':
+      out(true, tpl)
+    case 'list':
+    case undefined: {
+      const bindings = loadBindings(p.bindings)
+      const all = listWorkspaces(cfg)
+      if (json) out(true, all.map(w => w.name).join(', ') || 'no workspaces')
+      if (!all.length) out(true, `no workspaces in ${cfg.workspacesDir} — mmhub ws create <name> (copied from ${tpl})`)
+      for (const w of all) {
+        const ch = Object.entries(bindings).filter(([, n]) => n === w.name).map(([c]) => c)
+        console.log(`${w.name}  ${w.dir}\n  repos: ${w.repos.map(r => `${r.name}=${r.path}`).join(', ') || 'none'}\n  channels: ${ch.join(', ') || 'none'}`)
+      }
+      process.exit(0)
+    }
+    case 'create': {
+      if (!a1 || !validName(a1)) out(false, `usage: mmhub ws create <name> [description]  (letters, digits, . _ -; not "${TEMPLATE_DIR}")`)
+      const w = createWorkspace(cfg, a1, rest.join(' ') || undefined)
+      out(true, `workspace ${w.name} at ${w.dir} (from ${tpl})`)
+    }
+    case 'show': {
+      const w = a1 ? loadWorkspace(cfg, a1) : undefined
+      if (!w) out(false, `no workspace ${a1}`)
+      console.log(JSON.stringify(w, null, 2))
+      console.log(`\nproviders${w.providers ? '' : ' (the hub-wide list)'}: ${providerChain(cfg.providers, w.providers).join(' → ')}`)
+      const askers = !w.acceptFrom || w.acceptFrom.includes('*') ? 'every workspace' : w.acceptFrom.length ? w.acceptFrom.join(', ') : 'none'
+      const where = channelsOf(loadBindings(p.bindings), w.name)
+      console.log(`takes requests from: ${askers}${where.length ? '' : ' (no channel bound, so none can reach it)'}`)
+      const trig = loadTrigger(w.dir)
+      console.log(`trigger${w.trigger ? '' : ' (config.json)'}: ${effective(cfg, w).trigger}${effective(cfg, w).trigger === 'laya' ? ` — rules: ${trig.own ? triggerFile(w.dir) : 'built-in (no TRIGGER.md)'}` : ''}`)
+      const persona = routerPersona(cfg, w)
+      console.log(`\nrouter persona (${persona.source}):\n${persona.text}`)
+      process.exit(0)
+    }
+    case 'trigger': {
+      const w = a1 ? loadWorkspace(cfg, a1) : undefined
+      if (!w) out(false, a1 ? `no workspace ${a1}` : 'usage: mmhub ws trigger <workspace> [mention|laya|inherit]')
+      const [want] = rest
+      if (want === undefined) {
+        const t = effective(cfg, w).trigger
+        out(true, `workspace ${w.name}: ${t}${w.trigger ? '' : ' (from config.json)'}${t === 'laya' ? `; rules ${loadTrigger(w.dir).own ? triggerFile(w.dir) : 'built-in'}` : ''}`)
+      }
+      if (want !== 'mention' && want !== 'laya' && want !== 'inherit') out(false, 'usage: mmhub ws trigger <workspace> [mention|laya|inherit]')
+      const after = effective(cfg, setWorkspaceTrigger(cfg, w.name, want === 'inherit' ? undefined : want)).trigger
+      if (after !== 'laya') out(true, `workspace ${w.name}: posts need an @mention to start a thread; every reply in the bot's threads reaches it`)
+      let made = ''
+      if (!existsSync(triggerFile(w.dir))) {
+        writeFileSync(triggerFile(w.dir), DEFAULT_TRIGGER_MD, { mode: 0o644 })
+        made = `; wrote the starter rules to ${triggerFile(w.dir)}`
+      }
+      const why = await layaReady(cfg.laya)
+      out(true, `workspace ${w.name}: the bot follows threads it is @mentioned in, and Laya decides which replies without a mention reach it until the router unfollows${made}${why ? `. ⚠️ not working yet: ${why} (until it is, every reply in a followed thread reaches the router)` : ''}`)
+    }
+    case 'bind': {
+      const [ch] = rest
+      if (!a1 || !ch) out(false, 'usage: mmhub ws bind <workspace> <channel-id>')
+      if (!loadWorkspace(cfg, a1)) out(false, `no workspace ${a1}`)
+      bindChannel(p.bindings, ch, a1)
+      out(true, `channel ${ch} → workspace ${a1}`)
+    }
+    case 'unbind': {
+      if (!a1) out(false, 'usage: mmhub ws unbind <channel-id>')
+      out(true, unbindChannel(p.bindings, a1) ? `channel ${a1} unbound` : `channel ${a1} was not bound`)
+    }
+    default:
+      out(false, `unknown: mmhub ws ${sub}`)
+  }
+}
+
+async function repo(): Promise<never> {
+  const cfg = loadConfig(p.config)
+  const [, sub, wsName, src] = args
+  const nameIdx = args.indexOf('--name')
+  const name = nameIdx >= 0 ? args[nameIdx + 1] : undefined
+  try {
+    if (sub === 'add') {
+      if (!wsName || !src) out(false, 'usage: mmhub repo add <workspace> <path|git-url> [--name <n>]')
+      const r = await addRepo(cfg, wsName, src, name)
+      out(true, `added ${r.name} → ${r.path}`)
+    }
+    if (sub === 'rm') {
+      if (!wsName || !src) out(false, 'usage: mmhub repo rm <workspace> <name>')
+      out(true, removeRepo(cfg, wsName, src) ? `removed ${src} from ${wsName} (files untouched)` : `${wsName} has no repo ${src}`)
+    }
+  } catch (err) {
+    out(false, errMsg(err))
+  }
+  out(false, 'usage: mmhub repo add|rm …')
+}
+
+// ------------------------------------------------------------------ providers
+
+/** Provider failures and rest times, as the hub keeps them in hub.db. */
+function readHealth(): Record<string, Health> {
+  if (!existsSync(p.db)) return {}
+  try {
+    const db = new Database(p.db, { readonly: true })
+    try {
+      const row = db.query("SELECT v FROM kv WHERE k = 'provider-health'").get() as { v?: string } | null
+      return row?.v ? (JSON.parse(row.v) as Record<string, Health>) : {}
+    } finally {
+      db.close()
+    }
+  } catch {
+    return {}
+  }
+}
+
+/** Forget a provider's failures in hub.db (only while the hub is down; otherwise it is asked). */
+function forgetHealth(name: string): boolean {
+  if (!existsSync(p.db)) return false
+  const db = new Database(p.db)
+  try {
+    const row = db.query("SELECT v FROM kv WHERE k = 'provider-health'").get() as { v?: string } | null
+    const all = row?.v ? (JSON.parse(row.v) as Record<string, Health>) : {}
+    if (!all[name]) return false
+    delete all[name]
+    db.query("INSERT OR REPLACE INTO kv (k, v) VALUES ('provider-health', ?)").run(JSON.stringify(all))
+    return true
+  } finally {
+    db.close()
+  }
+}
+
+/** Tell a running hub that providers changed (it moves live sessions over). */
+async function notifyProviders(): Promise<string> {
+  if (!(await hubRunning())) return ''
+  try {
+    const r = await controlOp('provider', { op: 'changed' }, 120_000)
+    return r.text && r.text !== 'providers re-read' ? ` — hub: ${r.text}` : ''
+  } catch (err) {
+    return ` — hub: ${errMsg(err)}`
+  }
+}
+
+/** Read a secret: hidden prompt at a terminal, else all of stdin. Never from argv. */
+async function readSecretValue(label: string): Promise<string> {
+  if (!process.stdin.isTTY) return (await Bun.stdin.text()).replace(/\r?\n$/, '')
+  process.stderr.write(`${label} (input hidden, Enter to finish): `)
+  const restore = () => Bun.spawnSync(['stty', 'echo'], { stdin: 'inherit' })
+  Bun.spawnSync(['stty', '-echo'], { stdin: 'inherit' })
+  process.once('SIGINT', () => {
+    restore()
+    process.stderr.write('\n')
+    process.exit(130)
+  })
+  try {
+    for await (const line of console) return line
+    return ''
+  } finally {
+    restore()
+    process.stderr.write('\n')
+  }
+}
+
+function describeProvider(name: string, def: ProviderDef, health: Health | undefined, now: number): string {
+  const bits: string[] = []
+  const dir = configDirOf(p.dir, name, def)
+  if (dir) bits.push(`config ${dir}${def.kind === 'login' ? ` (${loginState(dir).replace(/-/g, ' ')})` : ''}`)
+  const env = Object.entries(def.env ?? {}).map(([k, v]) => `${k}=${v}`)
+  if (env.length) bits.push(`env ${env.join(' ')}`)
+  const secrets = secretNames(p.dir, name)
+  if (secrets.length) bits.push(`secrets ${secrets.join(', ')} (set)`)
+  if (def.routerModel || def.workerModel) bits.push(`models ${def.routerModel ?? '-'}/${def.workerModel ?? '-'}`)
+  const why = unusableReason(p.dir, name, def)
+  if (why) bits.push(`✗ ${why}`)
+  if (cooling(health, now)) bits.push(`⏸ resting ${fmtAge(health!.coolUntil! - now)} (${health!.fault}: ${health!.reason ?? ''})`)
+  else if (!why) bits.push('✓ ready')
+  return `  ${name.padEnd(16)} ${def.kind.padEnd(11)} ${bits.join(' · ')}`
+}
+
+/** Flags of `mmhub provider add`: --env K=V (repeatable), --config-dir, --router-model, --worker-model, --description, --channels. */
+function parseAddFlags(rest: string[]): { def: Partial<ProviderDef>; errors: string[] } {
+  const def: Partial<ProviderDef> = {}
+  const errors: string[] = []
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i]!
+    const val = () => {
+      const v = rest[++i]
+      if (v === undefined) errors.push(`${a} needs a value`)
+      return v ?? ''
+    }
+    if (a === '--env') {
+      const kv = val()
+      const m = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/s.exec(kv)
+      if (!m) errors.push(`--env wants KEY=VALUE, got ${kv.slice(0, 40)}`)
+      else (def.env ??= {})[m[1]!] = m[2]!
+    } else if (a === '--config-dir') def.configDir = val()
+    else if (a === '--router-model') def.routerModel = val()
+    else if (a === '--worker-model') def.workerModel = val()
+    else if (a === '--description') def.description = val()
+    else if (a === '--channels') def.channels = true
+    else errors.push(`unknown flag ${a.slice(0, 40)}`)
+  }
+  return { def, errors }
+}
+
+async function provider(): Promise<never> {
+  const cfg = loadConfig(p.config)
+  const [, sub, name, ...rest] = args
+  const defs = loadProviders(p.dir)
+  const now = Date.now()
+  const known = (n: string) => n === DEFAULT_PROVIDER || n === HUB_LIST || !!defs[n]
+
+  switch (sub) {
+    case 'list':
+    case undefined: {
+      const health = readHealth()
+      const ws = listWorkspaces(cfg)
+      if (json) out(true, `${Object.keys(defs).length} provider(s): ${Object.keys(defs).join(', ') || 'none'}; hub chain ${providerChain(cfg.providers, undefined).join(' → ')}`)
+      const lines = ['providers:', `  ${'default'.padEnd(16)} ${'default'.padEnd(11)} the hub's own environment and login${cooling(health[DEFAULT_PROVIDER], now) ? ` · ⏸ resting ${fmtAge(health[DEFAULT_PROVIDER]!.coolUntil! - now)}` : ''}`]
+      for (const [n, d] of Object.entries(defs)) lines.push(describeProvider(n, d, health[n], now))
+      lines.push('', `hub-wide chain: ${providerChain(cfg.providers, undefined).join(' → ')}${cfg.providers?.length ? '' : ' (built in; set it with mmhub provider use --hub <name>…)'}`)
+      if (ws.length) lines.push('', 'workspaces:')
+      for (const w of ws) {
+        const chain = providerChain(cfg.providers, w.providers)
+        const c = chooseProvider(chain, now, n => health[n], n => unusableReason(p.dir, n, defs[n]))
+        const state = c.unusable ? `✗ no usable provider (${c.name}: ${c.unusable})` : `active ${c.name}${c.fallback ? ' (fallback)' : ''}${c.healthy ? '' : ' (every provider failed: waiting)'}`
+        lines.push(`  ${w.name.padEnd(16)} ${chain.join(' → ')}${w.providers ? '' : ' (hub-wide)'}  ${state}`)
+      }
+      console.log(lines.join('\n'))
+      process.exit(0)
+    }
+
+    case 'add': {
+      const kind = rest[0]
+      if (!name || !kind) out(false, `usage: mmhub provider add <name> <kind> [--env K=V]… [--config-dir D] [--router-model M] [--worker-model M] [--channels]  (kinds: ${PROVIDER_KINDS.join(', ')})`)
+      if (!isKind(kind)) out(false, `unknown kind ${kind} — one of ${PROVIDER_KINDS.join(', ')}`)
+      const { def: extra, errors } = parseAddFlags(rest.slice(1))
+      const def: ProviderDef = { ...extra, kind }
+      errors.push(...validateDef(name, def))
+      const secretish = Object.keys(def.env ?? {}).filter(k => /KEY|TOKEN|SECRET|PASSWORD/i.test(k) && !/^ANTHROPIC_FOUNDRY_RESOURCE$/.test(k))
+      if (secretish.length) errors.push(`${secretish.join(', ')} look like secrets: store them with \`mmhub provider secret ${name} <VAR>\` (stdin), not --env`)
+      if (errors.length) out(false, errors.join('; '))
+      const replaced = !!defs[name]
+      defs[name] = def
+      saveProviders(p.dir, defs)
+      const info = KINDS[kind]
+      const next: string[] = [`${replaced ? 'updated' : 'added'} provider ${name} (${kind}: ${info.label})`]
+      if (kind === 'login') {
+        const dir = configDirOf(p.dir, name, def)!
+        ensureConfigDir(p.dir, name, dir)
+        next.push(`sign it in yourself, in your own terminal: ${loginCommand(dir, cfg.claudeBin ?? 'claude')}  — then /login, and /exit once signed in`)
+      }
+      for (const group of info.needsEnv) if (!group.some(k => def.env?.[k])) next.push(`it needs --env ${group.join(' or --env ')}=…`)
+      for (const group of info.needsSecret) next.push(`store its secret: mmhub provider secret ${name} ${group[0]}   (you type or pipe the value; it is never an argument)`)
+      if (!(def.channels ?? info.channels)) next.push(`⚠ Claude Code turns channels off on ${info.label}, so hub sessions there would never get a Mattermost message; the hub skips it (pass --channels only if your Claude Code carries channels there)`)
+      next.push(`use it: mmhub provider use <workspace> ${name} [fallback…]`)
+      const hub = await notifyProviders()
+      if (json) out(true, next[0]! + hub)
+      console.log(next.join('\n') + hub)
+      process.exit(0)
+    }
+
+    case 'rm': {
+      if (!name || !defs[name]) out(false, `no provider ${name ?? ''}`)
+      delete defs[name]
+      saveProviders(p.dir, defs)
+      const purge = rest.includes('--purge')
+      removeProviderFiles(p.dir, name, purge)
+      const users = [
+        ...(cfg.providers?.includes(name) ? ['the hub-wide chain'] : []),
+        ...listWorkspaces(cfg).filter(w => w.providers?.includes(name)).map(w => `workspace ${w.name}`),
+      ]
+      const hub = await notifyProviders()
+      out(true, `removed provider ${name} and its secrets${purge ? ' and config dir' : ''}${users.length ? `; still named in ${users.join(', ')} (skipped there until you change it)` : ''}${hub}`)
+    }
+
+    case 'secret': {
+      const variable = rest[0]
+      if (!name || !variable) out(false, `usage: mmhub provider secret <name> <VAR> [--unset]   (value from stdin; e.g. ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN)`)
+      if (!defs[name]) out(false, `no provider ${name} — mmhub provider add ${name} <kind> first`)
+      if (!/^[A-Z_][A-Z0-9_]*$/.test(variable)) out(false, `${variable.slice(0, 40)} isn't an environment variable name`)
+      if (rest.includes('--unset')) out(true, deleteSecret(p.dir, name, variable) ? `${name}: ${variable} removed` : `${name} had no ${variable}`)
+      const value = await readSecretValue(`${name} ${variable}`)
+      try {
+        writeSecret(p.dir, name, variable, value)
+      } catch (err) {
+        out(false, `${name} ${variable} not saved: ${errMsg(err)}`)
+      }
+      const usual = KINDS[defs[name]!.kind].secrets
+      const hub = await notifyProviders()
+      out(true, `${name}: ${variable} saved (${value.length} characters, 0600)${usual.length && !usual.includes(variable) ? ` — note: ${defs[name]!.kind} usually uses ${usual.join(', ')}` : ''}${hub}`)
+    }
+
+    case 'login': {
+      const def = name ? defs[name] : undefined
+      if (!name || !def) out(false, `no provider ${name ?? ''}`)
+      if (def.kind !== 'login') out(false, `${name} is a ${def.kind} provider: ${def.kind === 'oauth-token' ? 'run `claude setup-token` yourself, then' : 'store its secret with'} mmhub provider secret ${name} ${KINDS[def.kind].secrets[0] ?? '<VAR>'}`)
+      const dir = configDirOf(p.dir, name, def)!
+      ensureConfigDir(p.dir, name, dir)
+      const cmd = loginCommand(dir, cfg.claudeBin ?? 'claude')
+      if (json) out(true, cmd)
+      console.log([
+        `Sign provider "${name}" in. In your own terminal (not in a Claude chat), run:`,
+        '',
+        `  ${cmd}`,
+        '',
+        'then type /login, sign in with the account this provider stands for, and /exit once it says you are signed in.',
+        `It is ${loginState(dir) === 'signed-in' ? 'signed in already' : 'not signed in yet'}. Check it afterwards with: mmhub provider check ${name}`,
+      ].join('\n'))
+      process.exit(0)
+    }
+
+    case 'check': {
+      const def = name ? defs[name] : undefined
+      if (!name || (!def && name !== DEFAULT_PROVIDER)) out(false, `no provider ${name ?? ''}`)
+      const errs = def ? validateDef(name, def) : []
+      const why = unusableReason(p.dir, name, def)
+      const launch = buildLaunch(p.dir, name, def)
+      const env: Record<string, string> = {}
+      for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !(name !== DEFAULT_PROVIDER && PROVIDER_UNSET.includes(k)) && !/^(CLAUDE_CODE_|CLAUDECODE|MMHUB_)/.test(k)) env[k] = v
+      Object.assign(env, launch.env)
+      if (launch.apiKeyHelper) {
+        // auth status only reports which credential it would use: hand it the key through its environment (never argv).
+        const key = Bun.spawnSync(['/bin/sh', '-c', launch.apiKeyHelper]).stdout.toString().trim()
+        if (key) env.ANTHROPIC_API_KEY = key
+      }
+      const claude = cfg.claudeBin ?? Bun.which('claude', { PATH: cfg.path ?? process.env.PATH ?? '' })
+      let auth = 'claude not found'
+      if (claude) {
+        const r = Bun.spawnSync([claude, 'auth', 'status', '--json'], { env, stdout: 'pipe', stderr: 'pipe', timeout: 30_000 })
+        try {
+          const s = JSON.parse(r.stdout.toString()) as { loggedIn?: boolean; authMethod?: string; apiProvider?: string; email?: string; orgName?: string; subscriptionType?: string }
+          auth = `${s.loggedIn ? 'signed in' : 'not signed in'} · auth ${s.authMethod ?? '?'} · API ${s.apiProvider ?? '?'}${s.email ? ` · ${s.email}` : ''}${s.orgName ? ` (${s.orgName})` : ''}${s.subscriptionType ? ` · ${s.subscriptionType}` : ''}`
+        } catch {
+          auth = `claude auth status failed: ${r.stderr.toString().trim().split('\n').pop() ?? `exit ${r.exitCode}`}`
+        }
+      }
+      const health = readHealth()[name]
+      const lines = [
+        `${name} (${def?.kind ?? 'default'}): ${errs.length ? `✗ ${errs.join('; ')}` : why ? `✗ ${why}` : '✓ usable'}`,
+        `  claude: ${auth}`,
+        ...(launch.configDir ? [`  CLAUDE_CONFIG_DIR ${launch.configDir}`] : []),
+        ...(secretNames(p.dir, name).length ? [`  secrets: ${secretNames(p.dir, name).join(', ')}`] : []),
+        ...(cooling(health, now) ? [`  ⏸ resting ${fmtAge(health!.coolUntil! - now)} after ${health!.fault} (${health!.reason ?? ''}) — mmhub provider reset ${name} once fixed`] : []),
+      ]
+      const ok = !errs.length && !why
+      if (json) out(ok, lines.join(' | '))
+      console.log(lines.join('\n'))
+      process.exit(ok ? 0 : 1)
+    }
+
+    case 'use': {
+      const target = name
+      if (!target) out(false, 'usage: mmhub provider use <workspace|--hub> <name>… | mmhub provider use <workspace> --inherit')
+      const inherit = rest.includes('--inherit')
+      const list = rest.filter(a => a !== '--inherit').flatMap(a => a.split(',')).map(s => s.trim()).filter(Boolean)
+      if (!inherit && !list.length) out(false, 'name at least one provider (in fallback order), or --inherit')
+      const unknown = list.filter(n => !known(n))
+      if (unknown.length) out(false, `not defined: ${unknown.join(', ')} — mmhub provider add first (built in: default, hub)`)
+      const warn = list.filter(n => n !== HUB_LIST).map(n => [n, unusableReason(p.dir, n, defs[n])] as const).filter(([, w]) => w).map(([n, w]) => `${n}: ${w}`)
+      let what: string
+      if (target === '--hub') {
+        if (list.includes(HUB_LIST)) out(false, '"hub" only makes sense in a workspace list')
+        const raw = readJson<Record<string, unknown>>(p.config, () => ({}))
+        if (inherit) delete raw.providers
+        else raw.providers = list
+        writeJsonAtomic(p.config, raw)
+        what = `hub-wide chain: ${providerChain(inherit ? undefined : list, undefined).join(' → ')}`
+      } else {
+        if (!loadWorkspace(cfg, target)) out(false, `no workspace ${target}`)
+        const w = setWorkspaceProviders(cfg, target, inherit ? [] : list)
+        what = `workspace ${target}: ${providerChain(cfg.providers, w.providers).join(' → ')}${inherit ? ' (the hub-wide list)' : ''}`
+      }
+      const hub = await notifyProviders()
+      out(true, `${what}${warn.length ? ` — not usable yet: ${warn.join('; ')}` : ''}${hub}`)
+    }
+
+    case 'reset': {
+      if (!name) out(false, 'usage: mmhub provider reset <name>')
+      if (await hubRunning()) {
+        const r = await controlOp('provider', { op: 'reset', name }, 120_000)
+        out(r.ok, r.text ?? r.error ?? 'ok')
+      }
+      out(true, forgetHealth(name) ? `${name}: failures forgotten` : `${name} had no failures`)
+    }
+
+    default:
+      out(false, `unknown: mmhub provider ${sub} (list|add|rm|secret|login|check|use|reset)`)
+  }
+}
+
+const AGENT_LABEL = 'com.claude.mmhub'
+
+/** launchd agent (macOS): start the hub at login, restart it if it crashes. */
+async function agent(): Promise<never> {
+  if (process.platform !== 'darwin') out(false, 'launchd agents are macOS only — use your init system (run: bun src/hub/main.ts)')
+  const sub = args[1]
+  const plist = join(process.env.HOME ?? '', 'Library', 'LaunchAgents', `${AGENT_LABEL}.plist`)
+  const uid = process.getuid?.() ?? 0
+  if (sub === 'install') {
+    const cfg = loadConfig(p.config)
+    const PATH = cfg.path ?? process.env.PATH ?? '/usr/bin:/bin'
+    const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    const envs: Record<string, string> = { PATH, HOME: process.env.HOME ?? '' }
+    if (process.env.MMHUB_STATE_DIR) envs.MMHUB_STATE_DIR = p.dir
+    if (process.env.CLAUDE_CONFIG_DIR) envs.CLAUDE_CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>${AGENT_LABEL}</string>
+  <key>ProgramArguments</key><array><string>${esc(cfg.bunBin ?? process.execPath)}</string><string>${esc(join(ROOT, 'src', 'hub', 'main.ts'))}</string></array>
+  <key>EnvironmentVariables</key><dict>${Object.entries(envs).map(([k, v]) => `<key>${k}</key><string>${esc(v)}</string>`).join('')}</dict>
+  <key>WorkingDirectory</key><string>${esc(p.dir)}</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>ThrottleInterval</key><integer>30</integer>
+  <key>StandardOutPath</key><string>${esc(p.log)}</string>
+  <key>StandardErrorPath</key><string>${esc(p.log)}</string>
+</dict></plist>
+`
+    mkdirSync(join(process.env.HOME ?? '', 'Library', 'LaunchAgents'), { recursive: true })
+    await Bun.write(plist, xml)
+    if (await hubRunning()) await controlOp('shutdown')
+    await Bun.sleep(1000)
+    const r = Bun.spawnSync(['launchctl', 'bootstrap', `gui/${uid}`, plist])
+    out(r.exitCode === 0, r.exitCode === 0 ? `agent installed (${plist}); the hub now starts at login` : `launchctl bootstrap failed: ${r.stderr.toString().trim()}`)
+  }
+  if (sub === 'uninstall') {
+    Bun.spawnSync(['launchctl', 'bootout', `gui/${uid}/${AGENT_LABEL}`])
+    if (existsSync(plist)) (await import('fs')).rmSync(plist)
+    out(true, 'agent removed (the hub is stopped; sessions keep running)')
+  }
+  out(false, 'usage: mmhub agent install|uninstall')
+}
+
+/** Resolve names to Mattermost ids with the bot token (for the access / workspace skills). */
+async function lookup(): Promise<never> {
+  const [, kind, a, b] = args
+  const env = readEnvFile(p.env)
+  if (!env.MATTERMOST_URL || !env.MATTERMOST_BOT_TOKEN) out(false, 'not configured — run /mattermost-hub:configure')
+  const base = env.MATTERMOST_URL.replace(/\/+$/, '')
+  const get = async (path: string) => {
+    const res = await fetch(`${base}/api/v4${path}`, { headers: { Authorization: `Bearer ${env.MATTERMOST_BOT_TOKEN}` } })
+    const body = (await res.json()) as Record<string, unknown>
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${String(body.message ?? '')}`)
+    return body
+  }
+  if (kind === 'user' && a) {
+    const u = await get(`/users/username/${encodeURIComponent(a.replace(/^@/, ''))}`)
+    out(true, `${String(u.id)}  @${String(u.username)}`)
+  }
+  if (kind === 'channel' && a && b) {
+    const c = await get(`/teams/name/${encodeURIComponent(a)}/channels/name/${encodeURIComponent(b.replace(/^~/, ''))}`)
+    out(true, `${String(c.id)}  ~${String(c.name)} (${String(c.display_name)})`)
+  }
+  out(false, 'usage: mmhub lookup user <username> | mmhub lookup channel <team-name> <channel-name>')
+}
+
+async function main(): Promise<never> {
+  switch (args[0]) {
+    case 'lookup': return lookup()
+    case 'agent': return agent()
+    case 'start': return start()
+    case 'stop': return stop()
+    case 'status': return status()
+    case 'logs': return logs()
+    case 'doctor': return doctor()
+    case 'session': return session()
+    case 'ws': return ws()
+    case 'repo': return repo()
+    case 'provider':
+    case 'providers': return provider()
+    case 'reload': {
+      if (!(await hubRunning())) out(false, 'hub is not running')
+      const r = await controlOp('reload')
+      return out(r.ok, r.text ?? 'ok')
+    }
+    default: {
+      const doc = readFileSync(import.meta.path, 'utf8').match(/\/\*\*([\s\S]*?)\*\//)?.[1] ?? ''
+      console.log(doc.replace(/^ \* ?/gm, '').trim())
+      process.exit(args[0] && args[0] !== 'help' && args[0] !== '--help' ? 1 : 0)
+    }
+  }
+}
+
+try {
+  await main()
+} catch (err) {
+  out(false, errMsg(err))
+}

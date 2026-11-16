@@ -1,0 +1,22 @@
+{
+  "name": "mattermost-hub",
+  "version": "0.3.0",
+  "description": "Mattermost hub for Claude Code: thread routers, workspace worker pools, auto-closing tmux sessions",
+  "license": "Apache-2.0",
+  "type": "module",
+  "private": true,
+  "bin": { "mmhub": "./bin/mmhub" },
+  "scripts": {
+    "hub": "bun src/hub/main.ts",
+    "test": "bun test ./test/",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.9.3"
+  }
+}

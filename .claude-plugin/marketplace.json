@@ -1,0 +1,11 @@
+{
+  "name": "claude-mattermost-mods",
+  "owner": { "name": "nemixe" },
+  "plugins": [
+    {
+      "name": "mattermost-hub",
+      "source": "./",
+      "description": "Mattermost hub for Claude Code: thread routers, workspace worker pools, sessions panel"
+    }
+  ]
+}

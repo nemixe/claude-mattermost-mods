@@ -1,0 +1,6 @@
+{
+  "name": "mattermost-hub",
+  "version": "0.3.0",
+  "description": "Mattermost hub for Claude Code: thread routers, workspace worker pools, sessions panel",
+  "types": "./types/index.d.ts"
+}

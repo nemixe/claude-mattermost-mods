@@ -1,0 +1,4 @@
+# `bun test` runs the hub tests in test/. hooks/*.test.tsx are the panel mod's
+# tests, run by `claude plugin test .` (they import claude-code/testing).
+[test]
+root = "./test"
