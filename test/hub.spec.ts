@@ -67,6 +67,8 @@ function setup(config: Record<string, unknown> = {}, before?: (stateDir: string)
   const w = createWorkspace(loadConfig(p.config), 'demo')
   const tmux = new FakeTmux()
   const posts: Post[] = []
+  /** Other people's posts in threads (getThread shows them with the bot's). */
+  const others: MMPost[] = []
   const typing: string[] = []
   const reconnects: string[] = []
   let n = 0
@@ -86,10 +88,15 @@ function setup(config: Record<string, unknown> = {}, before?: (stateDir: string)
     typing: (channelId: string, parentId: string) => { typing.push(`${channelId}/${parentId}`) },
     addReaction: async () => ({}),
     username: async () => 'alice',
+    user: async (id: string) => ({ id, username: id === 'UBOT' ? 'devbot' : id === 'U2' ? 'bob' : 'alice', is_bot: id === 'UBOT' }),
+    userByName: async (name: string) => (name === 'dave' ? { id: 'U9', username: 'dave' } : undefined),
     channel: async (id: string) => ({ id, type: 'O', name: id, display_name: id }),
     directChannel: async () => ({ id: 'D1', type: 'D', name: 'BOT__U1', display_name: '' }),
     getThread: async (root: string) => ({
-      posts: Object.fromEntries(posts.filter(x => x.id === root || x.root_id === root).map((x, i) => [x.id, { ...x, user_id: 'bot', create_at: i, props: {} }])),
+      posts: Object.fromEntries([
+        ...posts.filter(x => x.id === root || x.root_id === root).map((x, i) => [x.id, { ...x, user_id: 'bot', create_at: i, props: {} }] as const),
+        ...others.filter(x => x.id === root || x.root_id === root).map(x => [x.id, x] as const),
+      ]),
     }),
   }
   const hub = new Hub({
@@ -97,7 +104,7 @@ function setup(config: Record<string, unknown> = {}, before?: (stateDir: string)
     claudeBin: '/bin/claude', bunBin: process.execPath, version: 'test', cliPath: '/cli.ts',
   })
   hub.store.insertThread({ id: 'T1', channelId: 'C1', workspace: 'demo', routerKey: 'r-t1', label: 'thread one', cursor: 0, createdAt: 0 })
-  return { hub, tmux, posts, w, typing, p, reconnects }
+  return { hub, tmux, posts, others, w, typing, p, reconnects }
 }
 
 async function until(what: string, fn: () => boolean, ms = 10_000): Promise<void> {
@@ -643,11 +650,11 @@ describe('Laya decides what reaches the bot', () => {
       async fetch(req) {
         if (down) return Response.json({ error: 'boom' }, { status: 500 })
         seen.push((await req.json()) as (typeof seen)[number])
-        return Response.json({ answers: { who: { type: 'choice', probabilities: { assistant: answer, people: 1 - answer } } } })
+        return Response.json({ answers: { who: { type: 'choice', probabilities: { hubbot: answer, nobody: 1 - answer } } } })
       },
     })
     try {
-      const { hub, tmux, w, p, posts } = setup({ laya: { url: `http://127.0.0.1:${laya.port}`, timeoutMs: 2000 } }, dir => {
+      const { hub, tmux, w, p, posts, others } = setup({ laya: { url: `http://127.0.0.1:${laya.port}`, timeoutMs: 2000 } }, dir => {
         writeFileSync(join(dir, 'access.json'), JSON.stringify({ dmPolicy: 'allowlist', allowFrom: ['U1'], channels: {}, pending: {} }))
       })
       hub.bot = { id: 'BOT', username: 'hubbot' }
@@ -655,6 +662,8 @@ describe('Laya decides what reaches the bot', () => {
       bindChannel(p.bindings, 'C1', 'demo')
       writeFileSync(join(w.dir, 'TRIGGER.md'), "## Answer\n- questions about the build\n## Don't answer\n- lunch plans\n")
       const rkey = hub.createRouter({ threadId: 'T3', channelId: 'C1', workspace: w, label: 'thread three' })
+      // Someone else has posted in the thread too, so Laya judges (with only the bot and alice, it wouldn't).
+      others.push({ id: 'B1', root_id: 'T3', user_id: 'U2', channel_id: 'C1', message: 'I can look at it later', create_at: 0 } as MMPost)
       const post = (id: string, message: string, root = 'T3') => ({ id, root_id: root, user_id: 'U1', channel_id: 'C1', message, create_at: Date.now() }) as MMPost
       const send = (id: string, message: string, root?: string) => hub.enqueue(() => hub.onPosted(post(id, message, root), 'O'))
 
@@ -664,8 +673,13 @@ describe('Laya decides what reaches the bot', () => {
       expect(tmux.launches.length).toBe(0)
       expect(seen[0]!.model).toBe('laya')
       expect(seen[0]!.state).toEndWith('>> @alice: lunch at noon?')
-      expect(Object.keys(seen[0]!.questions as object)).toEqual(['who', 'no0', 'yes0']) // the base question, then each rule
+      expect(seen[0]!.state).toStartWith('People in this thread: @hubbot (AI assistant), @bob, @alice.\n@bob: I can look at it later')
+      expect(Object.keys(seen[0]!.questions as object)).toEqual(['who', 'greeting', 'thanks', 'no0', 'yes0']) // the base question, greeting, thanks, then each rule
       expect(JSON.stringify(seen[0]!.questions)).toContain('questions about the build')
+      // Laya picks who the post is talking to, from the thread's participants.
+      const who0 = (seen[0]!.questions as { who: { instructions: string; criteria: Record<string, string> } }).who
+      expect(who0.instructions).toBe('Who is the last message (marked >>) talking to?')
+      expect(Object.keys(who0.criteria)).toEqual(['hubbot', 'bob', 'nobody'])
 
       // For the bot: the router gets it, and hears about the one it didn't get.
       answer = 0.9
@@ -675,6 +689,17 @@ describe('Laya decides what reaches the bot', () => {
       expect(rb.got[0]!.content).toContain('1 earlier message(s) in this thread were judged not meant for you')
       expect(rb.got[0]!.content).toContain('is the build green?')
       expect(hub.store.get('skipped:T3')).toBe('0')
+
+      // Another bot's post, and a reply to someone else: both are Laya's to judge, with everyone named.
+      answer = 0.1
+      const n = seen.length
+      await hub.enqueue(() => hub.onPosted({ ...post('M2b', 'Report: 3 alerts.'), user_id: 'UBOT', props: { from_bot: 'true' } } as MMPost, 'O'))
+      await send('M2c', '@dave what do you think?')
+      await until('Laya judged M2b and M2c', () => hub.store.get('skipped:T3') === '2')
+      expect(seen[n]!.state).toEndWith('>> @devbot (another AI bot): Report: 3 alerts.')
+      expect(Object.keys((seen[n + 1]!.questions as { who: { criteria: object } }).who.criteria)).toEqual(['hubbot', 'dave', 'bob', 'nobody'])
+      expect(rb.got.length).toBe(1)
+      answer = 0.9
 
       // A mention needs no judgement. Posts outside hub threads are never judged.
       const asked = seen.length
@@ -742,13 +767,57 @@ describe('Laya decides what reaches the bot', () => {
     }
   }, T)
 
+  test('a thread of only the bot and one person: every reply of theirs reaches the router without asking Laya', async () => {
+    const asked: unknown[] = []
+    const laya = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        asked.push(await req.json())
+        return Response.json({ answers: { who: { type: 'choice', probabilities: { hubbot: 0, nobody: 1 } } } })
+      },
+    })
+    try {
+      const { hub, tmux, w, p, others } = setup({ laya: { url: `http://127.0.0.1:${laya.port}`, timeoutMs: 2000 } }, dir => {
+        writeFileSync(join(dir, 'access.json'), JSON.stringify({ dmPolicy: 'allowlist', allowFrom: ['U1'], channels: {}, pending: {} }))
+      })
+      hub.bot = { id: 'BOT', username: 'hubbot' }
+      setWorkspaceTrigger(loadConfig(p.config), 'demo', 'laya')
+      bindChannel(p.bindings, 'C1', 'demo')
+      const rkey = hub.createRouter({ threadId: 'T5', channelId: 'C1', workspace: w, label: 'thread five' })
+      const reply = (id: string, message: string, user = 'U1') => {
+        const post = { id, root_id: 'T5', user_id: user, channel_id: 'C1', message, create_at: Date.now() } as MMPost
+        others.push(post)
+        return hub.enqueue(() => hub.onPosted(post, 'O'))
+      }
+      others.push({ id: 'T5', root_id: '', user_id: 'U1', channel_id: 'C1', message: '@hubbot check the alerts', create_at: 0 } as MMPost)
+      others.push({ id: 'R1', root_id: 'T5', user_id: 'BOT', channel_id: 'C1', message: '2 alerts today.', create_at: 1 } as MMPost)
+
+      // Laya would say "not for the bot", but isn't asked: a greeting or thanks reaches the bot too.
+      await reply('M1', 'thanks!')
+      const rb = await connect(hub, tmux, rkey, 1)
+      await until('M1 reaches the router', () => rb.got.length === 1)
+      await reply('M2', 'hi again')
+      await until('M2 reaches the router', () => rb.got.length === 2)
+      expect(asked.length).toBe(0)
+
+      // A third person joins: from then on, Laya judges.
+      others.push({ id: 'B1', root_id: 'T5', user_id: 'U2', channel_id: 'C1', message: 'one of them is mine', create_at: Date.now() } as MMPost)
+      await reply('M3', 'ok')
+      await until('Laya judged M3', () => hub.store.get('skipped:T5') === '1')
+      expect((asked[0] as { state: string }).state).toStartWith('People in this thread: @alice, @hubbot (AI assistant), @bob.')
+      expect(rb.got.length).toBe(2)
+    } finally {
+      laya.stop(true)
+    }
+  }, T)
+
   test('a DM is never judged: every message reaches the router, which hears nothing of Laya or unfollow', async () => {
     const asked: unknown[] = []
     const laya = Bun.serve({
       port: 0,
       async fetch(req) {
         asked.push(await req.json())
-        return Response.json({ answers: { who: { type: 'choice', probabilities: { assistant: 0, people: 1 } } } })
+        return Response.json({ answers: { who: { type: 'choice', probabilities: { hubbot: 0, nobody: 1 } } } })
       },
     })
     try {

@@ -127,14 +127,43 @@ on, the bot **follows** each thread it is @mentioned in:
 Posts outside the bot's threads still need a mention. DMs are never judged: every DM from
 an owner reaches the bot, without a mention, and there is nothing to follow or unfollow.
 
-Laya sees the new reply and up to 10 posts before it in the thread, clipped to fit its
-512-token window, and judges who the reply is for.
+**Two people: always for the bot.** When only the bot and one person have posted in the
+thread, every reply from that person reaches the router without asking Laya, greetings
+and thanks included. This doesn't apply when the reply @mentions someone else (Laya then
+judges it), or when a bot account wrote it, so two bots can't keep answering each other.
+
+**More people: Laya judges.** Laya sees who has posted in the thread ("People in this
+thread: …"), the new reply, and up to 10 posts before it, clipped to fit its 512-token
+window. Each poster is labelled: the bot as the AI assistant, other bot accounts as other
+AI bots. Laya is asked who the reply is talking to, and the answers are built
+from the thread itself: the bot, the people and bots the reply @mentions, the thread's
+other posters (up to 6 in all), and "nobody". The reply reaches the router when Laya
+picks the bot with a probability of at least `threshold` (0.45). Since the answers name
+everyone, Laya can tell a reply to another bot or person from one to this bot. In a
+channel where a person mostly talks to another bot, the older assistant-or-people
+question sent nearly every reply to this bot. Without the "People in this thread" line,
+this question sent about a quarter. With it, 4 in 526 reach the bot, along with 3 of the 5
+requests that were for the bot in threads of three or more (a `threshold` of 0.5 sends 1
+in 526, but only 2 of the 5). In such threads an @mention always gets through.
+
+For each person or bot the reply @mentions, Laya is also asked whether the reply is
+talking to them. When it is sure (`ruleThreshold`, 0.85), the reply isn't for the bot,
+even in a thread where the person has mostly talked to the bot. A reply that only names
+someone ("summarize what @devbot said") scores lower, and the main question decides.
+
+Laya is also asked whether the reply is just a greeting, or thanks. A greeting
+("hi all", "selamat pagi") isn't for the bot. Thanks are for whoever wrote the post before
+it: they reach the bot only after the bot's own post. Laya is sure of these at
+`kindThreshold` (0.7), and both come before the `TRIGGER.md` rules. English greetings and
+thanks are recognised reliably. Indonesian thanks ("makasih", "terima kasih") score only
+about 0.5, so for them the rules and the main question decide.
+
 The rules in `TRIGGER.md` correct it. They are an `## Answer` list and a `## Don't answer`
 list, one rule per line, at most 24 rules of 150 characters. Laya checks each rule on its
 own, and a rule decides only when Laya is sure it describes the post (`ruleThreshold`,
-0.85). A sure "don't answer" rule wins. Specific rules work ("Lunch plans", "Thanks and
-small talk"); vague ones ("anything about work") change nothing. On sample chats it
-decided 12 of 13 correctly, in about 0.1 s per post.
+0.85). A sure "don't answer" rule wins. Specific rules work ("Lunch plans", "Deploy
+requests"); vague ones ("anything about work") change nothing. A post takes about
+0.05 s to judge (up to 0.5 s for long ones, about 1 s when the model first loads).
 
 The rules learn. When someone says the bot answered something that wasn't for it, or
 missed something that was, the router has a worker change the rules with the
@@ -238,7 +267,7 @@ to the router; `thread`: they post in the thread), `idleMinutes` (`{router:30, w
 `gitBin`, `path`, `tmuxSocket` (`mmhub`), `providers` (`["default"]`),
 `providerCooldownMinutes` (`{auth:60, quota:60, rate_limit:10, errors:15, channels:360}`),
 `trigger` (`mention`; or `laya`, see [above](#answering-without-a-mention-laya)), `laya`
-(`{url: "http://127.0.0.1:11434", model: "laya", threshold: 0.5, ruleThreshold: 0.85, timeoutMs: 5000, messages: 10}`).
+(`{url: "http://127.0.0.1:11434", model: "laya", threshold: 0.45, ruleThreshold: 0.85, kindThreshold: 0.7, timeoutMs: 5000, messages: 10}`).
 A workspace's `workspace.json` can override models, permission mode, idle minutes and
 `providers` and `trigger`, and sets which workspaces may ask it (`acceptFrom`,
 [above](#other-workspaces-and-dms)).

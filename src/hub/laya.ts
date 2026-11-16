@@ -9,9 +9,40 @@
  * all, each option at most 48 tokens, and a longer text is cut silently. It is
  * English-only (laya:322m-multilingual-bf16 reads 100+ languages).
  *
- * What worked on sample chats (laya:latest, Nov 2026): one base question, "who
- * is the last message (marked >>) meant for: the assistant or other people?",
- * with the conversation oldest first. Rules phrased as a whole instruction
+ * The base question is dynamic: "who is the last message (marked >>) talking
+ * to?", with one answer per participant (the bot first, then those the post
+ * @mentions, then the thread's other posters, latest first) and "nobody".
+ * Posters are labelled in the conversation: the bot "(AI assistant)", other
+ * bot accounts "(another AI bot)". Measured on a real channel (laya:latest,
+ * Nov 2026) where a person mostly talked to another bot: the older two-way
+ * question ("the assistant or other people?") sent nearly every reply there to
+ * the bot, since they were all meant for *an* AI; with the participants as
+ * answers, about a third did, at the same hit rate on posts that were for the
+ * bot. Giving Laya only the bot's own posts made it worse (it then can't see
+ * who the person is talking to).
+ *
+ * The base question underrates an @mention: in a thread where a person mostly
+ * talks to the bot, "@other can you…" still scored for the bot. So for each
+ * account the post @mentions, Laya is also asked "is the last message talking
+ * to @other?" (`to0…`). It is sure (0.88 to 0.94) when the post does talk to
+ * them, and less sure (0.63 to 0.8) when it only names them ("summarize what
+ * @other said"); when sure (`ruleThreshold`), the post isn't for the bot.
+ *
+ * The conversation starts with everyone in the thread ("People in this thread:
+ * …", the bot always among them). On the same channel this made Laya far more
+ * careful: at `threshold` 0.45, 4 in 526 replies not for the bot were sent,
+ * against about 1 in 4 without it, and 3 of 5 requests for it in threads of
+ * three or more (all 5 without it; at 0.5, 2 of 5 and 1 in 526).
+ *
+ * When the thread holds only the bot and the person who wrote the newest post, and the post
+ * @mentions no one else, it is for the bot without asking Laya (`twoWay`).
+ * Otherwise Laya is also asked whether the post is just a greeting (then it
+ * isn't for the bot) or thanks (then it is for whoever wrote the post before it,
+ * so for the bot only after the bot's own post). Laya tells English greetings
+ * and thanks apart surely (0.8 to 0.98); Indonesian thanks ("makasih") scored
+ * only about 0.5, so those fall through to the rules and the base question.
+ *
+ * Rules phrased as a whole instruction
  * made it worse. Asked one by one ("does this describe the last message?"),
  * specific rules score high when they apply (thanks 0.99, lunch plans 0.86),
  * while vague ones hover around 0.5 to 0.8 on everything. So each rule is a
@@ -31,16 +62,18 @@ export type LayaConfig = {
   /** Ollama's base URL. */
   url: string
   model: string
-  /** Answer when the base question's probability of "meant for the bot" is at least this. */
+  /** Answer when the base question's probability of "talking to the bot" is at least this. */
   threshold: number
   /** A rule decides, over the base question, when it describes the post with at least this probability. */
   ruleThreshold: number
+  /** Laya is sure the post is just a greeting, or thanks, from this probability. */
+  kindThreshold: number
   timeoutMs: number
   /** Earlier posts Laya reads along with the newest one. */
   messages: number
 }
 
-export const DEFAULT_LAYA: LayaConfig = { url: 'http://127.0.0.1:11434', model: 'laya', threshold: 0.5, ruleThreshold: 0.85, timeoutMs: 5000, messages: 10 }
+export const DEFAULT_LAYA: LayaConfig = { url: 'http://127.0.0.1:11434', model: 'laya', threshold: 0.45, ruleThreshold: 0.85, kindThreshold: 0.7, timeoutMs: 5000, messages: 10 }
 
 /** Rules Laya is asked about, all told (each is one question; Laya takes 64 per call). */
 export const MAX_RULES = 24
@@ -66,7 +99,7 @@ ${RULE_MAX_CHARS} characters, ${MAX_RULES} rules in all). Vague rules do nothing
 - A question or request addressed to the bot, Claude, or "the AI"
 
 ## Don't answer
-- Thanks, greetings, acknowledgements and small talk
+- Acknowledgements and small talk
 `
 
 export type TriggerRules = { answer: string[]; ignore: string[] }
@@ -121,55 +154,178 @@ export function saveTrigger(wsDir: string, content: string): TriggerRules {
   return rules
 }
 
-export type ChatLine = { who: string; text: string }
+/** A post as Laya sees it: its author's username (`bot`: a bot account) and its text. */
+export type ChatLine = { user: string; bot?: boolean; text: string }
+/** Someone the newest post may be talking to. */
+export type Person = { user: string; bot?: boolean }
+
+/** Answers to "who is it talking to?" besides "nobody": the bot and up to five others. */
+export const MAX_PARTICIPANTS = 6
+/** Characters of a username in Laya's text and options. */
+const NAME_CHARS = 40
+const EVERYONE = new Set(['channel', 'here', 'all'])
 
 function clip(s: string, n: number): string {
   const t = s.replace(/\s+/g, ' ').trim()
   return t.length > n ? `${t.slice(0, n - 1)}…` : t
 }
 
-/** The conversation, oldest first, the newest post last and marked ">>"; the oldest posts go when it is too long. */
-export function buildState(newest: ChatLine, earlier: ChatLine[]): string {
+/** How a poster appears to Laya: the bot is the AI assistant; other bot accounts are other AI bots. */
+function label(p: Person, bot: string): string {
+  const name = `@${clip(p.user, NAME_CHARS)}`
+  return p.user === bot ? `${name} (AI assistant)` : p.bot ? `${name} (another AI bot)` : name
+}
+
+/** People named on the "People in this thread" line, at most. */
+export const MAX_PEOPLE = 8
+
+/**
+ * Everyone in the thread: those who have posted, in the order they first did, the
+ * newest post's author last if they hadn't. The bot first if it hasn't posted yet:
+ * it follows the thread, so it was mentioned there.
+ */
+export function members(bot: string, newest: ChatLine, people: Person[]): Person[] {
+  const out: Person[] = people.some(p => p.user === bot) ? [] : [{ user: bot, bot: true }]
+  for (const p of [...people, newest]) if (!out.some(x => x.user === p.user)) out.push({ user: p.user, bot: p.bot })
+  return out
+}
+
+/**
+ * The conversation: who has posted in the thread (when `people` is given), then
+ * the posts oldest first, the newest last and marked ">>"; the oldest posts go
+ * when it is too long.
+ */
+export function buildState(bot: string, newest: ChatLine, earlier: ChatLine[], people?: Person[]): string {
   const lines: string[] = []
-  let room = CONTEXT_CHARS
+  let head: string | undefined
+  if (people) {
+    const all = members(bot, newest, people)
+    const more = all.length - MAX_PEOPLE
+    head = `People in this thread: ${all.slice(0, MAX_PEOPLE).map(p => label(p, bot)).join(', ')}${more > 0 ? ` and ${more} more` : ''}.`
+  }
+  let room = CONTEXT_CHARS - (head ? head.length + 1 : 0)
   for (const l of [...earlier].reverse()) {
-    const line = `${l.who}: ${clip(l.text || '(a file)', LINE_CHARS)}`
+    const line = `${label(l, bot)}: ${clip(l.text || '(a file)', LINE_CHARS)}`
     if (line.length > room) break
     lines.unshift(line)
     room -= line.length + 1
   }
-  return [...lines, `>> ${newest.who}: ${clip(newest.text || '(a file)', NEWEST_CHARS)}`].join('\n')
+  return [...(head ? [head] : []), ...lines, `>> ${label(newest, bot)}: ${clip(newest.text || '(a file)', NEWEST_CHARS)}`].join('\n')
+}
+
+/** Usernames a post @mentions (lowercase, in order; not @channel, @here or @all). */
+export function mentionedNames(text: string): string[] {
+  const out: string[] = []
+  for (const m of text.matchAll(/(^|[^\w.-])@([\w][\w.-]*)/g)) {
+    const name = m[2]!.replace(/[.-]+$/, '').toLowerCase()
+    if (name && !EVERYONE.has(name) && !out.includes(name)) out.push(name)
+  }
+  return out
+}
+
+/** Who the newest post may be talking to: the bot, then those it @mentions, then the thread's other posters, latest first. */
+export function participants(bot: string, newest: ChatLine, earlier: ChatLine[], mentioned: Person[] = []): Person[] {
+  const out: Person[] = [{ user: bot, bot: true }]
+  const add = (p: Person, isMention: boolean) => {
+    if (out.some(x => x.user === p.user) || (p.user === newest.user && !isMention)) return
+    out.push({ user: p.user, bot: p.bot })
+  }
+  for (const m of mentioned) add(m, true)
+  for (const l of [...earlier].reverse()) add(l, false)
+  return out.slice(0, MAX_PARTICIPANTS)
+}
+
+const NOBODY = 'nobody'
+/** The option key of a participant ("nobody" is taken). The bot comes first, so its key never changes. */
+function optionKeys(ps: Person[]): string[] {
+  const keys: string[] = []
+  for (const p of ps) {
+    let k = p.user.replace(/[^\w]/g, '_')
+    while (k === NOBODY || keys.includes(k)) k += '_'
+    keys.push(k)
+  }
+  return keys
+}
+
+/** Accounts the post @mentions besides the bot: one "is it talking to them?" question each. */
+function addressees(bot: string, mentioned: Person[] = []): Person[] {
+  const out: Person[] = []
+  for (const m of mentioned) if (m.user !== bot && !out.some(x => x.user === m.user)) out.push(m)
+  return out.slice(0, MAX_PARTICIPANTS - 1)
+}
+
+/**
+ * Only the bot and one person have posted in the thread, that person wrote the
+ * newest post, and it @mentions no one but the bot: then it is for the bot,
+ * whatever it says. Not when a bot account wrote it (two bots would answer each
+ * other).
+ */
+export function twoWay(bot: string, newest: ChatLine, people: Person[], mentioned: Person[] = []): boolean {
+  if (newest.bot || newest.user === bot || addressees(bot, mentioned).length) return false
+  return people.every(p => p.user === bot || p.user === newest.user)
+}
+
+/** Who wrote the post before the newest one (the latest by someone else): thanks are for them. */
+export function previousAuthor(newest: ChatLine, earlier: ChatLine[]): Person | undefined {
+  const l = earlier.findLast(x => x.user !== newest.user)
+  return l && { user: l.user, bot: l.bot }
+}
+
+/** The bot's option key in the base question. */
+export function botKey(bot: string): string {
+  return optionKeys([{ user: bot }])[0]!
 }
 
 const ON = 'the last message (marked >>)'
+// Asked apart: one "greeting, thanks or else?" question scored thanks lower.
+const GREETING = { greeting: 'A greeting (any language): hi, hai, halo, hello, hey, pagi, good morning, selamat pagi.', other: 'Anything else: a question, request, answer, thanks or remark.' }
+const THANKS = { thanks: 'Thanks: thanks, thank you, thx, makasih, terima kasih.', other: 'Anything else: a question, request, answer, greeting or remark.' }
 
-/** The /v1/systemone request: the base question `who`, then one question per rule (`no0…`, `yes0…`). */
-export function buildRequest(o: { bot: string; rules: TriggerRules; newest: ChatLine; earlier: ChatLine[]; model: string }): Record<string, unknown> {
+/**
+ * The /v1/systemone request: the base question `who` (one answer per participant,
+ * then "nobody"), "is it talking to @x?" for each account the post @mentions
+ * (`to0…`), whether it is just a greeting (`greeting`) or thanks (`thanks`), then
+ * one question per rule (`no0…`, `yes0…`).
+ */
+export function buildRequest(o: { bot: string; rules: TriggerRules; newest: ChatLine; earlier: ChatLine[]; people?: Person[]; mentioned?: Person[]; model: string }): Record<string, unknown> {
   const r = usableRules(o.rules)
-  const questions: Record<string, unknown> = {
-    who: {
-      type: 'choice',
-      instructions: `Who is ${ON} meant for?`,
-      criteria: {
-        assistant: `The AI assistant @${o.bot} (also called Claude, the bot or the AI): asks or tells it something, or answers its question.`,
-        people: 'Other people in the chat, or nobody.',
-      },
-    },
-  }
+  const ps = participants(o.bot, o.newest, o.earlier, o.mentioned)
+  const otherBots = ps.some(p => p.user !== o.bot && p.bot)
+  const keys = optionKeys(ps)
+  const criteria: Record<string, string> = {}
+  ps.forEach((p, i) => {
+    const name = `@${clip(p.user, NAME_CHARS)}`
+    criteria[keys[i]!] = p.user === o.bot
+      ? `${name} (AI assistant${otherBots ? '' : ', also called Claude, the bot or the AI'})`
+      : `${name} (${p.bot ? 'another AI bot' : 'a person'})`
+  })
+  criteria[NOBODY] = 'Nobody in particular, or everyone: chatter, thanks, news.'
+  const questions: Record<string, unknown> = { who: { type: 'choice', instructions: `Who is ${ON} talking to?`, criteria } }
+  addressees(o.bot, o.mentioned).forEach((m, i) => {
+    const name = `@${clip(m.user, NAME_CHARS)}`
+    questions[`to${i}`] = { type: 'choice', instructions: `Is ${ON} talking to ${name}?`, criteria: { yes: `Yes: it asks or tells ${name} something.`, no: 'No: it is for someone else.' } }
+  })
+  questions.greeting = { type: 'choice', instructions: `What is ${ON}?`, criteria: GREETING }
+  questions.thanks = { type: 'choice', instructions: `What is ${ON}?`, criteria: THANKS }
   const rule = (text: string) => ({ type: 'choice', instructions: `Does this describe ${ON}?`, criteria: { a: text, b: 'Something else' } })
   r.ignore.forEach((t, i) => (questions[`no${i}`] = rule(t)))
   r.answer.forEach((t, i) => (questions[`yes${i}`] = rule(t)))
-  return { model: o.model, state: buildState(o.newest, o.earlier), questions, keep_alive: '30m' }
+  return { model: o.model, state: buildState(o.bot, o.newest, o.earlier, o.people), questions, keep_alive: '30m' }
 }
 
 type Answers = Record<string, { probabilities?: Record<string, number> } | undefined>
 
 export type Verdict = { yes: boolean; p: number; why: string }
 
-/** The decision from Laya's answers: a sure "don't answer" rule, else a sure "answer" rule, else the base question. */
-export function decide(answers: Answers, rules: TriggerRules, cfg: Pick<LayaConfig, 'threshold' | 'ruleThreshold'>): Verdict {
+/**
+ * The decision from Laya's answers: not for the bot when it is sure the post talks to
+ * someone it @mentions. Sure it is thanks: for the bot when `previous` (who wrote the
+ * post before) is the bot. Sure it is just a greeting: not for the bot. Then a sure
+ * "don't answer" rule, a sure "answer" rule, and last the base question.
+ */
+export function decide(answers: Answers, rules: TriggerRules, cfg: Pick<LayaConfig, 'threshold' | 'ruleThreshold' | 'kindThreshold'>, bot: string, mentioned: Person[] = [], previous?: Person): Verdict {
   const p = (k: string, opt: string) => answers[k]?.probabilities?.[opt]
-  const base = p('who', 'assistant')
+  const base = p('who', botKey(bot))
   if (typeof base !== 'number' || !Number.isFinite(base)) throw new Error('Laya: no answer in its reply')
   const r = usableRules(rules)
   const sure = (prefix: string, list: string[]) => {
@@ -180,6 +336,21 @@ export function decide(answers: Answers, rules: TriggerRules, cfg: Pick<LayaConf
     })
     return best
   }
+  const to = addressees(bot, mentioned)
+  let other: { i: number; p: number } | undefined
+  to.forEach((_, i) => {
+    const q = p(`to${i}`, 'yes')
+    if (typeof q === 'number' && q >= cfg.ruleThreshold && (!other || q > other.p)) other = { i, p: q }
+  })
+  if (other) return { yes: false, p: other.p, why: `talking to @${clip(to[other.i]!.user, 40)}` }
+  // Sure of both (a greeting can read as thanks, and back): the likelier one.
+  const kind = (k: 'greeting' | 'thanks') => { const q = p(k, k); return typeof q === 'number' && q >= cfg.kindThreshold ? q : 0 }
+  const greeting = kind('greeting'), thanks = kind('thanks')
+  if (thanks && thanks >= greeting) {
+    const to = previous ? `@${clip(previous.user, 40)}` : 'nobody'
+    return { yes: previous?.user === bot, p: thanks, why: `thanks, for the post before it (${to})` }
+  }
+  if (greeting) return { yes: false, p: greeting, why: 'just a greeting, in a thread of more than two' }
   const no = sure('no', r.ignore)
   if (no) return { yes: false, p: no.p, why: `don't-answer rule "${clip(r.ignore[no.i]!, 40)}"` }
   const yes = sure('yes', r.answer)
@@ -202,22 +373,28 @@ export async function askLaya(cfg: Pick<LayaConfig, 'url' | 'timeoutMs'>, body: 
 }
 
 /**
- * Judge a post: build the request, ask, decide. A rule Laya refuses (too many
- * tokens for an option) is left out and the question asked again.
+ * Judge a post: in a thread of only the bot and its author, it is for the bot
+ * (`twoWay`, `people` being everyone who posted before it); else build the request,
+ * ask, decide. A rule or @mention Laya refuses (too many tokens for an option) is
+ * left out and the question asked again.
  */
-export async function judge(cfg: LayaConfig, o: { bot: string; rules: TriggerRules; newest: ChatLine; earlier: ChatLine[] }, fetchFn: typeof fetch = fetch): Promise<Verdict> {
+export async function judge(cfg: LayaConfig, o: { bot: string; rules: TriggerRules; newest: ChatLine; earlier: ChatLine[]; people?: Person[]; mentioned?: Person[] }, fetchFn: typeof fetch = fetch): Promise<Verdict> {
+  if (o.people && twoWay(o.bot, o.newest, o.people, o.mentioned)) return { yes: true, p: 1, why: `only @${clip(o.newest.user, 40)} and the bot in this thread` }
   const rules = usableRules(o.rules)
   const kept: TriggerRules = { answer: [...rules.answer], ignore: [...rules.ignore] }
+  const mentioned = addressees(o.bot, o.mentioned)
+  const previous = previousAuthor(o.newest, o.earlier)
   for (let attempt = 0; ; attempt++) {
-    const body = buildRequest({ ...o, rules: kept, model: cfg.model })
+    const body = buildRequest({ ...o, rules: kept, mentioned, model: cfg.model })
     try {
-      return decide(await askLaya(cfg, body, fetchFn), kept, cfg)
+      return decide(await askLaya(cfg, body, fetchFn), kept, cfg, o.bot, mentioned, previous)
     } catch (err) {
       const m = err instanceof Error ? /question (\d+): option \d+ has \d+ tokens/.exec(err.message) : null
-      const i = m ? Number(m[1]) - 1 : -1 // question 0 is `who`
-      if (!m || i < 0 || attempt >= 3) throw err
-      if (i < kept.ignore.length) kept.ignore.splice(i, 1)
-      else kept.answer.splice(i - kept.ignore.length, 1)
+      const key = m ? Object.keys(body.questions as object)[Number(m[1])] : undefined
+      const k = key ? /^(to|no|yes)(\d+)$/.exec(key) : null // `who`, `greeting` and `thanks` can't be left out
+      if (!k || attempt >= 3) throw err
+      const list = k[1] === 'to' ? mentioned : k[1] === 'no' ? kept.ignore : kept.answer
+      list.splice(Number(k[2]), 1)
     }
   }
 }

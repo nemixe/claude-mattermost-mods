@@ -88,6 +88,18 @@ export class Mattermost {
     return u
   }
 
+  /** A user by username (cached with the others); undefined when there is none. */
+  async userByName(name: string): Promise<MMUser | undefined> {
+    for (const u of this.users.values()) if (u.username === name) return u
+    try {
+      const u = await this.json<MMUser>('GET', `/users/username/${encodeURIComponent(name)}`)
+      this.users.set(u.id, u)
+      return u
+    } catch {
+      return undefined
+    }
+  }
+
   async username(id: string): Promise<string> {
     try {
       return (await this.user(id)).username

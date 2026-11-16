@@ -62,8 +62,12 @@ Arguments passed: `$ARGUMENTS`
   reach it. `mention` (default): an @mention starts a thread, and every reply in it
   reaches the router. `laya`: the bot follows a thread from its first mention until the
   router calls `unfollow` (request done) or an owner sends `!unfollow`. While followed,
-  the local Laya model judges each reply without a mention, from the reply, the 10
-  posts before it and `TRIGGER.md`. Once unfollowed, only a mention reaches the bot,
+  a reply from the one person who shares the thread with the bot always reaches it
+  (unless it @mentions someone else). With more people, the local Laya model judges
+  who each reply without a mention is talking to (the bot, the people and bots in the
+  thread, or nobody), from who has posted, the reply, the 10 posts before it and
+  `TRIGGER.md`. A reply Laya is sure talks to someone it @mentions isn't for the bot,
+  nor is a greeting. Thanks reach the bot only right after its own post. Once unfollowed, only a mention reaches the bot,
   and it follows the thread again. DMs skip all of this: every DM reaches the bot. Run
   `mmhub ws trigger <ws> laya`: it writes starter rules if there are none and says
   whether Laya is ready. If it isn't, the user runs `ollama pull laya` (Ollama 0.40 or

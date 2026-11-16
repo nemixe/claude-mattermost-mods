@@ -14,7 +14,7 @@
 import { errMsg, log } from '../shared/util'
 import type { Hub } from './hub'
 import type { InboundAction } from './inbound'
-import { judge, loadTrigger, type ChatLine } from './laya'
+import { judge, loadTrigger, MAX_PARTICIPANTS, mentionedNames, type ChatLine, type Person } from './laya'
 import type { MMPost } from './mattermost'
 import { loadBindings } from './workspaces'
 
@@ -45,11 +45,14 @@ async function verdict(hub: Hub, a: Classify, post: MMPost): Promise<boolean> {
   if (!w) return true
   const cfg = hub.cfg.laya
   try {
+    const { earlier, people } = await thread(hub, post, cfg.messages)
     const v = await judge(cfg, {
       bot: hub.bot.username,
       rules: loadTrigger(w.dir).rules,
-      newest: { who: await who(hub, post), text: post.message },
-      earlier: await before(hub, post, cfg.messages),
+      newest: await line(hub, post),
+      earlier,
+      people,
+      mentioned: await mentioned(hub, post.message),
     })
     log('trigger', `${post.id} (${w.name}): ${v.p.toFixed(2)} by ${v.why} → ${v.yes ? 'to the router' : 'not for the bot'}`)
     return v.yes
@@ -91,21 +94,44 @@ export function inDM(hub: Hub, threadId: string): boolean {
   return !!t && hub.store.get(`dm-channel:${t.channelId}`) === '1'
 }
 
-/** Posts before this one in its thread (Laya judges replies only). */
-async function before(hub: Hub, post: MMPost, n: number): Promise<ChatLine[]> {
-  if (n <= 0 || !post.root_id) return []
+/** The last `n` posts before this one in its thread, and everyone who wrote any post before it (Laya judges replies only). */
+async function thread(hub: Hub, post: MMPost, n: number): Promise<{ earlier: ChatLine[]; people: Person[] }> {
+  if (!post.root_id) return { earlier: [], people: [] }
   const res = await hub.mm.getThread(post.root_id)
   const posts = Object.values(res.posts)
     .filter(p => p.id !== post.id && !p.type && p.create_at <= post.create_at)
     .sort((x, y) => x.create_at - y.create_at)
-    .slice(-n)
-  const out: ChatLine[] = []
-  for (const p of posts) out.push({ who: await who(hub, p), text: p.message })
-  return out
+  const people: Person[] = []
+  const ids = new Set<string>()
+  for (const p of posts) {
+    if (ids.has(p.user_id)) continue
+    ids.add(p.user_id)
+    people.push(await author(hub, p.user_id))
+  }
+  const earlier: ChatLine[] = []
+  for (const p of n > 0 ? posts.slice(-n) : []) earlier.push(await line(hub, p))
+  return { earlier, people }
 }
 
-async function who(hub: Hub, p: { user_id: string }): Promise<string> {
-  return p.user_id === hub.bot.id ? `@${hub.bot.username} (AI assistant)` : `@${await hub.mm.username(p.user_id)}`
+/** A post with its author's username, and whether a bot account wrote it. */
+async function line(hub: Hub, p: { user_id: string; message: string }): Promise<ChatLine> {
+  return { ...(await author(hub, p.user_id)), text: p.message }
+}
+
+async function author(hub: Hub, userId: string): Promise<Person> {
+  if (userId === hub.bot.id) return { user: hub.bot.username, bot: true }
+  const u = await hub.mm.user(userId).catch(() => undefined)
+  return { user: u?.username ?? userId, bot: !!u?.is_bot }
+}
+
+/** Users the post @mentions that exist (they are among Laya's answers). */
+async function mentioned(hub: Hub, text: string): Promise<Person[]> {
+  const out: Person[] = []
+  for (const name of mentionedNames(text).slice(0, MAX_PARTICIPANTS)) {
+    const u = await hub.mm.userByName(name)
+    if (u) out.push({ user: u.username, bot: !!u.is_bot })
+  }
+  return out
 }
 
 /** "(N messages … not for you)" for a router, once; empty when there were none. */
