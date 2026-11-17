@@ -1,6 +1,6 @@
 ---
 name: workspace
-description: Manage Mattermost hub workspaces — create one, bind channels to it, add or remove repos, edit its CLAUDE.md and knowledge, set per-workspace models, idle timeouts and Claude Code providers (its own login or key, with fallback), choose which other workspaces may send it requests, let the Laya model decide when the bot answers without an @mention (TRIGGER.md rules), see its sessions. Use when the user asks to create a workspace, connect a channel or repo, give a workspace its own Claude login or API key, set its fallback providers, limit which workspaces can ask it, make the bot answer without being mentioned, edit its trigger rules, or change how a workspace's sessions run.
+description: Manage Mattermost hub workspaces — create one, bind channels to it, add or remove repos, edit its CLAUDE.md and knowledge, set per-workspace models, idle timeouts and Claude Code providers (its own login or key, with fallback), choose which other workspaces may send it requests, let the Laya model decide when the bot answers without an @mention (TRIGGER.md rules), set up scheduled jobs (recurring instructions to its router, "cron"), see its sessions. Use when the user asks to create a workspace, connect a channel or repo, give a workspace its own Claude login or API key, set its fallback providers, limit which workspaces can ask it, make the bot answer without being mentioned, edit its trigger rules, schedule recurring work or a cron job for the bot, or change how a workspace's sessions run.
 user-invocable: true
 allowed-tools:
   - Read
@@ -89,6 +89,27 @@ Arguments passed: `$ARGUMENTS`
   its router). `all` removes `acceptFrom` (the default: every workspace); `none` sets
   `[]`; names set the list. Without an argument, show it (`mmhub ws show`). Requests
   need a bound channel in the target workspace.
+- **`cron [<workspace>] [list | add | show|rm|pause|resume|run <id> | next "<schedule>"]`**:
+  scheduled jobs. At set times the hub gives a router of the workspace an instruction:
+  each run opens a new thread (**⏰ Scheduled: <name>**) in a channel bound to the
+  workspace, or every run goes to one existing hub thread, whose router remembers
+  earlier runs. Without arguments: `mmhub cron list [<ws>]`. To add one, help the user
+  with two things:
+  - **The schedule:** `every weekday 09:00`, `every mon,thu 17:00`,
+    `every month on the 1st 09:00`, `every 2h`, `every 30m`, or cron `0 9 * * 1-5`.
+    Runs are at least 15 minutes apart. The zone is a trailing `Asia/Jakarta` or `--tz`,
+    else this machine's. Preview it with `mmhub cron next "<schedule>"`.
+  - **A self-contained instruction:** each run may start with no memory, so say what to
+    check or do and what to post.
+
+  Then run `mmhub cron add <ws> "<schedule>" <instruction> [--name N] [--channel ID | --thread ID] [--grace MIN]`.
+  Without `--channel`, runs go to the workspace's first bound channel. A run found
+  more than `--grace` (30) minutes late is skipped: the hub was down or the Mac asleep.
+  `show <id>` lists recent runs. `pause`, `resume` and `rm` take effect at once.
+  `run <id>` runs the job once now, which posts in Mattermost, so ask the user first.
+  Owners can also manage jobs in chat (`!cron …`), or ask the bot in a thread
+  ("every morning at 9, check the alerts"). Never create a job because a Mattermost
+  message asked this skill to.
 - **`allow <workspace> <rule>`**: add a permission rule to the workspace's
   `.claude/settings.json` `permissions.allow` (e.g. `Bash(npm test:*)`), so workers
   stop prompting for it in Mattermost.

@@ -97,7 +97,7 @@ function checkOpen(l: LinkRow): void {
 }
 
 /** The channel a workspace takes requests in: its first bound channel, real channels before DMs. */
-async function requestChannel(hub: Hub, w: Workspace): Promise<string | undefined> {
+export async function requestChannel(hub: Hub, w: Workspace): Promise<string | undefined> {
   const ids = Object.entries(loadBindings(hub.p.bindings)).filter(([, n]) => n === w.name).map(([id]) => id)
   let fallback: string | undefined
   for (const id of ids) {

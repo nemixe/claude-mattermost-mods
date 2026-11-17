@@ -1,10 +1,13 @@
 /**
  * Control ops from `mmhub` (and so from the panel mod): session stop / wake /
- * restart / pin / unpin, status, reload, shutdown. Answers are `{ok, message}`.
+ * restart / pin / unpin, scheduled jobs, status, reload, shutdown. Answers are
+ * `{ok, message}`.
  */
 
 import { SESSION_KEY_RE } from '../shared/snapshot'
+import { errMsg } from '../shared/util'
 import type { Hub } from './hub'
+import { addJob, getJob, jobsText, jobText, onChain, removeJob, runNow, setPaused } from './jobs'
 import { isLive } from './lifecycle'
 
 export type ControlResult = { ok: boolean; message: string; data?: unknown }
@@ -38,6 +41,8 @@ export async function control(hub: Hub, op: string, args: Record<string, unknown
       hub.status.write()
       return res
     }
+    case 'cron':
+      return onChain(hub, () => cron(hub, args)).catch((err): ControlResult => ({ ok: false, message: errMsg(err) }))
     case 'shutdown':
       setTimeout(shutdown, 100)
       return { ok: true, message: 'hub stopping (sessions keep running and are adopted at next start)' }
@@ -79,5 +84,49 @@ export async function control(hub: Hub, op: string, args: Record<string, unknown
     }
     default:
       return { ok: false, message: `unknown op ${op}` }
+  }
+}
+
+/** `mmhub cron …` (jobs.ts). Call on the chain. */
+async function cron(hub: Hub, a: Record<string, unknown>): Promise<ControlResult> {
+  const sub = String(a.op ?? '')
+  const id = Number(a.id)
+  const by = 'mmhub cli'
+  const opt = (k: string) => (typeof a[k] === 'string' && a[k] !== '' ? String(a[k]) : undefined)
+  switch (sub) {
+    case 'list': {
+      const ws = opt('workspace')
+      if (ws && !hub.ws(ws)) return { ok: false, message: `no workspace ${ws}` }
+      return { ok: true, message: jobsText(hub, ws, false), data: hub.store.jobs(ws) }
+    }
+    case 'show': {
+      const job = getJob(hub, id)
+      return { ok: true, message: jobText(hub, job, { md: false, runs: 20 }), data: { job, runs: hub.store.runs(id, 20) } }
+    }
+    case 'add': {
+      const grace = a.grace === undefined ? undefined : Number(a.grace)
+      const job = await addJob(hub, {
+        workspace: String(a.workspace ?? ''), schedule: String(a.schedule ?? ''), text: String(a.text ?? ''),
+        name: opt('name'), tz: opt('tz'), channelId: opt('channel'), threadId: opt('thread'), graceMinutes: grace,
+        createdBy: by, origin: 'cli',
+      })
+      return { ok: true, message: `added ${jobText(hub, job, { md: false })}`, data: job }
+    }
+    case 'rm': {
+      const job = removeJob(hub, id, by)
+      return { ok: true, message: `removed job #${job.id} "${job.name}"` }
+    }
+    case 'pause':
+    case 'resume': {
+      const job = setPaused(hub, id, sub === 'pause', by)
+      return { ok: true, message: jobText(hub, job, { md: false }), data: job }
+    }
+    case 'run': {
+      const { job, run } = await runNow(hub, id, by)
+      if (run?.status === 'failed') return { ok: false, message: `job #${job.id} couldn't run: ${run.note ?? 'see mmhub logs'}` }
+      return { ok: true, message: `job #${job.id} "${job.name}" is running${run?.threadId ? ` in thread ${run.threadId} (${hub.permalink(run.threadId)})` : ''}` }
+    }
+    default:
+      return { ok: false, message: `unknown cron op ${sub.slice(0, 20)} (list|show|add|rm|pause|resume|run)` }
   }
 }

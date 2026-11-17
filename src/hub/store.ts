@@ -7,6 +7,9 @@
  *  tasks     work handed to workers
  *  inbox     messages handed to routers (kept until the turn that read them ends,
  *            so an interrupted router gets them again)
+ *  jobs      scheduled jobs (jobs.ts): what to tell a router, when, and where
+ *  job_runs  each time a job was due: started, skipped, missed or failed
+ *            (one row per scheduled time, so a time never runs twice)
  */
 
 import { Database } from 'bun:sqlite'
@@ -118,6 +121,19 @@ CREATE TABLE IF NOT EXISTS links (
   messages INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS links_from ON links(from_key, created_at);
+CREATE TABLE IF NOT EXISTS jobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, workspace TEXT NOT NULL, schedule TEXT NOT NULL, cron TEXT NOT NULL,
+  tz TEXT NOT NULL, channel_id TEXT, thread_id TEXT, text TEXT NOT NULL, grace_minutes INTEGER NOT NULL DEFAULT 30,
+  paused INTEGER NOT NULL DEFAULT 0, created_by TEXT NOT NULL, origin TEXT NOT NULL, created_at INTEGER NOT NULL,
+  next_at INTEGER, last_at INTEGER, last_status TEXT, last_thread TEXT
+);
+CREATE INDEX IF NOT EXISTS jobs_due ON jobs(paused, next_at);
+CREATE TABLE IF NOT EXISTS job_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER NOT NULL, slot INTEGER NOT NULL, kind TEXT NOT NULL,
+  at INTEGER NOT NULL, status TEXT NOT NULL, thread_id TEXT, inbox_id INTEGER, note TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS job_runs_slot ON job_runs(job_id, slot) WHERE kind = 'scheduled';
+CREATE INDEX IF NOT EXISTS job_runs_job ON job_runs(job_id, id);
 `
 
 /**
@@ -141,6 +157,57 @@ export type LinkRow = {
   /** Messages exchanged in it, both ways. */
   messages: number
   createdAt: number
+}
+
+/** What became of a job's due time. */
+export type RunStatus = 'started' | 'skipped' | 'missed' | 'failed'
+
+/**
+ * A scheduled job: at each time its schedule gives, the hub hands `text` to a
+ * router of its workspace — a new thread in `channelId` each run, or the
+ * router of the existing hub thread `threadId`.
+ */
+export type JobRow = {
+  id: number
+  name: string
+  workspace: string
+  /** As written ("every weekday 09:00"). */
+  schedule: string
+  /** The cron expression it means (cron.ts). */
+  cron: string
+  /** IANA time zone the schedule's times are in. */
+  tz: string
+  channelId?: string
+  threadId?: string
+  text: string
+  /** A run found due later than this (the hub was down, the machine asleep) is skipped instead. */
+  graceMinutes: number
+  paused: boolean
+  /** "@alice", or "mmhub cli". */
+  createdBy: string
+  /** Where it was set up: "thread <id>", or "cli". */
+  origin: string
+  createdAt: number
+  /** The next due time (undefined: the schedule never runs again). */
+  nextAt?: number
+  lastAt?: number
+  lastStatus?: RunStatus
+  /** The thread the latest run went to. */
+  lastThread?: string
+}
+
+export type JobRunRow = {
+  id: number
+  jobId: number
+  /** The due time it is for (a manual run: when it was asked for). */
+  slot: number
+  kind: 'scheduled' | 'manual'
+  at: number
+  status: RunStatus
+  threadId?: string
+  /** The router message it became (inbox id): still open while the run goes on. */
+  inboxId?: number
+  note?: string
 }
 
 /** A post the hub made for a session (the router digest reads workers' ones). */
@@ -167,6 +234,20 @@ function toLink(r: Raw): LinkRow {
   return {
     threadId: String(r.thread_id), kind: r.kind === 'dm' ? 'dm' : 'workspace', channelId: String(r.channel_id), fromKey: String(r.from_key),
     fromWorkspace: String(r.from_workspace), fromThread: s(r.from_thread), peer: String(r.peer), chain, messages: Number(r.messages), createdAt: Number(r.created_at),
+  }
+}
+function toJob(r: Raw): JobRow {
+  return {
+    id: Number(r.id), name: String(r.name), workspace: String(r.workspace), schedule: String(r.schedule), cron: String(r.cron),
+    tz: String(r.tz), channelId: s(r.channel_id), threadId: s(r.thread_id), text: String(r.text), graceMinutes: Number(r.grace_minutes),
+    paused: !!r.paused, createdBy: String(r.created_by), origin: String(r.origin), createdAt: Number(r.created_at),
+    nextAt: n(r.next_at), lastAt: n(r.last_at), lastStatus: s(r.last_status) as RunStatus | undefined, lastThread: s(r.last_thread),
+  }
+}
+function toRun(r: Raw): JobRunRow {
+  return {
+    id: Number(r.id), jobId: Number(r.job_id), slot: Number(r.slot), kind: r.kind === 'manual' ? 'manual' : 'scheduled', at: Number(r.at),
+    status: r.status as RunStatus, threadId: s(r.thread_id), inboxId: n(r.inbox_id), note: s(r.note),
   }
 }
 function toThread(r: Raw): ThreadRow {
@@ -433,6 +514,100 @@ export class Store {
   bumpLink(threadId: string): number {
     this.db.query('UPDATE links SET messages = messages + 1 WHERE thread_id = ?').run(threadId)
     return this.link(threadId)?.messages ?? 0
+  }
+
+  // ---------------------------------------------------------------- jobs
+
+  insertJob(j: Omit<JobRow, 'id' | 'lastAt' | 'lastStatus' | 'lastThread'>): number {
+    const r = this.db.query(`INSERT INTO jobs (name, workspace, schedule, cron, tz, channel_id, thread_id, text, grace_minutes, paused, created_by, origin, created_at, next_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      j.name, j.workspace, j.schedule, j.cron, j.tz, j.channelId ?? null, j.threadId ?? null, j.text, j.graceMinutes, j.paused ? 1 : 0,
+      j.createdBy, j.origin, j.createdAt, j.nextAt ?? null,
+    )
+    return Number(r.lastInsertRowid)
+  }
+
+  job(id: number): JobRow | undefined {
+    const r = this.db.query('SELECT * FROM jobs WHERE id = ?').get(id) as Raw | null
+    return r ? toJob(r) : undefined
+  }
+
+  jobs(workspace?: string): JobRow[] {
+    const rows = workspace
+      ? this.db.query('SELECT * FROM jobs WHERE workspace = ? ORDER BY id').all(workspace)
+      : this.db.query('SELECT * FROM jobs ORDER BY id').all()
+    return (rows as Raw[]).map(toJob)
+  }
+
+  /** Jobs not paused whose next time has come, earliest first. */
+  dueJobs(now: number): JobRow[] {
+    return (this.db.query('SELECT * FROM jobs WHERE paused = 0 AND next_at IS NOT NULL AND next_at <= ? ORDER BY next_at, id').all(now) as Raw[]).map(toJob)
+  }
+
+  patchJob(id: number, p: Partial<Pick<JobRow, 'paused' | 'nextAt' | 'lastAt' | 'lastStatus' | 'lastThread'>>): void {
+    const map: Record<string, string> = { paused: 'paused', nextAt: 'next_at', lastAt: 'last_at', lastStatus: 'last_status', lastThread: 'last_thread' }
+    const sets: string[] = []
+    const args: (string | number | null)[] = []
+    for (const [k, v] of Object.entries(p)) {
+      const col = map[k]
+      if (!col) continue
+      sets.push(`${col} = ?`)
+      args.push(v === undefined ? null : typeof v === 'boolean' ? (v ? 1 : 0) : (v as string | number))
+    }
+    if (!sets.length) return
+    this.db.query(`UPDATE jobs SET ${sets.join(', ')} WHERE id = ?`).run(...args, id)
+  }
+
+  deleteJob(id: number): boolean {
+    const r = this.db.query('DELETE FROM jobs WHERE id = ?').run(id)
+    this.db.query('DELETE FROM job_runs WHERE job_id = ?').run(id)
+    return Number(r.changes) > 0
+  }
+
+  /**
+   * Record what became of a due time and move the job on to `nextAt`, in one
+   * transaction. A scheduled time already recorded is not recorded again:
+   * returns undefined then (it ran, or was passed over, before).
+   */
+  recordRun(r: Omit<JobRunRow, 'id'>, nextAt: number | undefined | 'keep'): number | undefined {
+    return this.db.transaction(() => {
+      const res = this.db.query('INSERT OR IGNORE INTO job_runs (job_id, slot, kind, at, status, thread_id, inbox_id, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(r.jobId, r.slot, r.kind, r.at, r.status, r.threadId ?? null, r.inboxId ?? null, r.note ?? null)
+      if (nextAt !== 'keep') this.patchJob(r.jobId, { nextAt })
+      if (!Number(res.changes)) return undefined
+      this.patchJob(r.jobId, { lastAt: r.at, lastStatus: r.status })
+      return Number(res.lastInsertRowid)
+    })()
+  }
+
+  patchRun(id: number, p: Partial<Pick<JobRunRow, 'status' | 'threadId' | 'inboxId' | 'note'>>): void {
+    const map: Record<string, string> = { status: 'status', threadId: 'thread_id', inboxId: 'inbox_id', note: 'note' }
+    const sets: string[] = []
+    const args: (string | number | null)[] = []
+    for (const [k, v] of Object.entries(p)) {
+      const col = map[k]
+      if (!col) continue
+      sets.push(`${col} = ?`)
+      args.push(v === undefined ? null : (v as string | number))
+    }
+    if (!sets.length) return
+    this.db.query(`UPDATE job_runs SET ${sets.join(', ')} WHERE id = ?`).run(...args, id)
+  }
+
+  /** A job's runs, newest first. */
+  runs(jobId: number, limit = 10): JobRunRow[] {
+    return (this.db.query('SELECT * FROM job_runs WHERE job_id = ? ORDER BY id DESC LIMIT ?').all(jobId, limit) as Raw[]).map(toRun)
+  }
+
+  /** State of a router message (inbox row), if it is still kept. */
+  messageState(id: number): TaskState | undefined {
+    const r = this.db.query('SELECT state FROM inbox WHERE id = ?').get(id) as Raw | null
+    return r ? (String(r.state) as TaskState) : undefined
+  }
+
+  /** Forget job runs older than `before`. */
+  pruneRuns(before: number): void {
+    this.db.query('DELETE FROM job_runs WHERE at < ?').run(before)
   }
 
   // ---------------------------------------------------------------- kv

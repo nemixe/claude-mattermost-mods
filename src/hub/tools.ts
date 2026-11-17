@@ -10,6 +10,7 @@ import { assertSendable, chunk, errMsg, fmtAge, log, MAX_ATTACHMENT_BYTES, MAX_F
 import type { Hub } from './hub'
 import { isLive } from './lifecycle'
 import { loadTrigger, MAX_RULES, RULE_MAX_CHARS, saveTrigger, triggerFile, usableRules } from './laya'
+import { listSchedulesTool, scheduleTool, unscheduleTool } from './jobs'
 import { forwardAnswer, linkedTo, listWorkspacesText, messageWorkspace, sendDM } from './links'
 import { inDM, setFollowing } from './trigger'
 import type { MMPost } from './mattermost'
@@ -28,6 +29,18 @@ function str(a: Args, k: string, required = true): string | undefined {
   }
   if (typeof v !== 'string') throw new ToolError(`"${k}" must be a string`)
   return v
+}
+
+/** A whole number (also given as "3" or "#3"). */
+function int(a: Args, k: string, required = true): number | undefined {
+  const v = a[k]
+  if (v === undefined || v === null || v === '') {
+    if (required) throw new ToolError(`missing "${k}"`)
+    return undefined
+  }
+  const n = typeof v === 'number' ? v : typeof v === 'string' ? Number(v.replace(/^#/, '')) : NaN
+  if (!Number.isInteger(n)) throw new ToolError(`"${k}" must be a whole number`)
+  return n
 }
 
 function strList(a: Args, k: string): string[] {
@@ -341,6 +354,20 @@ export async function handleCall(hub: Hub, key: string, tool: string, a: Args): 
       })
     case 'send_dm':
       return sendDM(hub, key, { user: str(a, 'user', false), text: str(a, 'text')!, threadId: str(a, 'thread_id', false) })
+    case 'schedule':
+      return scheduleTool(hub, key, {
+        schedule: str(a, 'schedule')!,
+        text: str(a, 'text')!,
+        messageId: str(a, 'message_id', false),
+        name: str(a, 'name', false),
+        tz: str(a, 'timezone', false),
+        inThisThread: a.in_this_thread === true,
+        graceMinutes: int(a, 'grace_minutes', false),
+      })
+    case 'unschedule':
+      return unscheduleTool(hub, key, { jobId: int(a, 'job_id')!, messageId: str(a, 'message_id', false) })
+    case 'list_schedules':
+      return listSchedulesTool(hub, key)
     case 'list_workers':
       if (role !== 'router') throw new ToolError('routers only')
       return listWorkers(hub, key)

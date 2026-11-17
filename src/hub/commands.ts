@@ -6,11 +6,16 @@
 import { errMsg, fmtAge, log } from '../shared/util'
 import type { Hub } from './hub'
 import type { InboundAction } from './inbound'
+import { stripLeadingMention } from './inbound'
+import { addJob, getJob, jobsText, jobText, removeJob, runNow, setPaused, summary } from './jobs'
 import { isLive } from './lifecycle'
 import type { MMPost } from './mattermost'
 import { delegate, ToolError } from './tools'
 import { following, inDM, setFollowing } from './trigger'
 import { bindChannel, createWorkspace, effective, listWorkspaces, loadBindings, loadWorkspace, removeWorktrees, validName } from './workspaces'
+
+const CRON_USAGE = `Usage: \`!cron\` (list) · \`!cron add <schedule> | <instruction>\` · \`!cron show|rm|pause|resume|run <id>\`
+Schedules: \`every day 09:00\`, \`every weekday 8:30\`, \`every mon,thu 17:00\`, \`every month on the 1st 09:00\`, \`every 2h\`, \`every 30m\`, or cron \`0 9 * * 1-5\`; a time zone may follow (\`… Asia/Jakarta\`). Or ask me in a thread ("every morning at 9, check the alerts").`
 
 const HELP = `**Mattermost hub commands** (owners)
 \`!ws\` workspace, repos, channels and sessions · \`!workers\` the worker pool
@@ -20,6 +25,7 @@ const HELP = `**Mattermost hub commands** (owners)
 \`!worker stop <id>\` close a worker · \`!worker rm <id>\` remove it and its clean worktrees
 \`!delegate <worker-id|new> <task>\` hand a task to a worker from this thread
 \`!unfollow\` / \`!follow\` (workspaces where Laya decides) stop or start passing this thread's messages without a mention to Laya
+\`!cron\` this workspace's scheduled jobs · \`!cron add <schedule> | <instruction>\` a job that opens a new thread here at each run, e.g. \`!cron add every weekday 09:00 | check the alerts\` · \`!cron show|rm|pause|resume|run <id>\`
 Permission prompts: \`yes abcde\` / \`no abcde\`, or ✅ / ❌ on the 🔐 post.`
 
 function sessionLine(hub: Hub, key: string): string {
@@ -130,6 +136,8 @@ export async function runCommand(hub: Hub, a: Extract<InboundAction, { kind: 'co
           ? '👂 Following this thread: Laya passes me the messages here that are meant for me.'
           : 'Stopped following this thread: only messages that mention me reach me now, and a mention follows it again.')
       }
+      case 'cron':
+        return await cron(hub, a, post, wsName, say)
       case 'delegate': {
         if (!thread) return say('`!delegate` works inside a hub thread.')
         const [who, ...rest] = a.args
@@ -149,6 +157,54 @@ export async function runCommand(hub: Hub, a: Extract<InboundAction, { kind: 'co
   } catch (err) {
     log('command', `!${a.name}: ${errMsg(err)}`)
     await say(`⚠️ ${err instanceof ToolError ? err.message : errMsg(err)}`)
+  }
+}
+
+/** `!cron …`: the scheduled jobs of the workspace this channel or thread belongs to. */
+async function cron(hub: Hub, a: Extract<InboundAction, { kind: 'command' }>, post: MMPost, wsName: string | undefined, say: (m: string) => Promise<void>): Promise<void> {
+  if (!wsName) return say('This channel is not bound to a workspace.')
+  const sub = (a.args[0] ?? 'list').toLowerCase()
+  const by = `@${await hub.mm.username(post.user_id)}`
+  const id = (): number => {
+    const n = Number((a.args[1] ?? '').replace(/^#/, ''))
+    if (!Number.isInteger(n) || n <= 0) throw new ToolError(`Usage: \`!cron ${sub} <id>\` (\`!cron\` lists them)`)
+    return n
+  }
+  switch (sub) {
+    case 'list':
+    case 'ls':
+      return say(jobsText(hub, wsName, true))
+    case 'show':
+      return say(jobText(hub, getJob(hub, id(), wsName), { md: true, runs: 10 }))
+    case 'add': {
+      // The raw text, so the instruction keeps its lines.
+      const raw = stripLeadingMention(post.message, hub.bot.username).replace(/^!cron\s+add\b\s*/i, '')
+      const bar = raw.indexOf('|')
+      if (bar < 0 || !raw.slice(0, bar).trim() || !raw.slice(bar + 1).trim()) return say(CRON_USAGE)
+      const job = await addJob(hub, {
+        workspace: wsName, schedule: raw.slice(0, bar), text: raw.slice(bar + 1), channelId: post.channel_id,
+        createdBy: by, origin: `thread ${a.threadId}`,
+      })
+      return say(`⏰ Scheduled job #${job.id} **${job.name}**: ${summary(hub, job)}. \`!cron rm ${job.id}\` removes it, \`!cron run ${job.id}\` runs it now.`)
+    }
+    case 'rm':
+    case 'remove':
+    case 'delete': {
+      const job = removeJob(hub, id(), by, wsName)
+      return say(`🗑 Removed scheduled job #${job.id} **${job.name}**.`)
+    }
+    case 'pause':
+    case 'resume': {
+      const job = setPaused(hub, id(), sub === 'pause', by, wsName)
+      return say(job.paused ? `⏸ Job #${job.id} **${job.name}** is paused; \`!cron resume ${job.id}\` resumes it.` : `▶️ Job #${job.id} **${job.name}** is on: ${summary(hub, job)}.`)
+    }
+    case 'run': {
+      const { job, run } = await runNow(hub, id(), by, wsName)
+      if (run?.status === 'failed') return say(`⚠️ Job #${job.id} **${job.name}** couldn't run: ${run.note ?? 'see mmhub logs'}`)
+      return say(`▶️ Running job #${job.id} **${job.name}** now${run?.threadId ? `: ${hub.permalink(run.threadId)}` : ''}.`)
+    }
+    default:
+      return say(CRON_USAGE)
   }
 }
 

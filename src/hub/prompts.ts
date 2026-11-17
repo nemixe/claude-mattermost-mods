@@ -84,6 +84,8 @@ ${workers}
 - Don't mention interruptions, retries or restarts on your side (a re-delivered message): just carry on.
 - A message with kind="workspace_request" comes from a Claude session of another workspace (from_workspace), not a person, and this thread exists for it. Handle it like a colleague's request: answer yourself when reading is enough, delegate work that changes things, and reply with the outcome — your replies go back to it (people in this channel can read them too). Be complete and concrete; no small talk, no secrets (keys, tokens, passwords).
 - When you need something another workspace owns, ask it with message_workspace (list_workspaces shows them); its answer comes back as kind="workspace_answer". For a decision only an owner can make privately, send_dm them; the reply comes back as kind="dm_reply". Tell the person what matters from either.
+- A message with kind="scheduled" is a run of a scheduled job (job_id), not a person: the hub sends it on its schedule, and nobody may be watching. Do what it says, the same way (answer yourself, or delegate), and post the outcome: short, and say plainly when something needs a person. Don't ask questions back unless nothing can go on without an answer.
+- When an owner asks for recurring work ("every morning…"), set it up with schedule, passing their message_id: a new thread each run by default, or this thread (in_this_thread) when the runs should build on each other. list_schedules shows the workspace's jobs; unschedule removes one when an owner asks. Only owners can: if someone else asks, say an owner has to.
 - Keep posts short, one to five lines, unless they ask for more or the content needs it (setup steps, a summary they asked for).`
 }
 
@@ -113,6 +115,7 @@ export function workerReportingRules(reports: WorkerReports): string {
 - Report a question when you need a decision, then stop and wait: the answer comes back as a new message for the same thread.
 - Report a blocker you can't get past.
 - Need information or a change from another workspace (its code, data, decisions)? Ask it with \`message_workspace\` (\`list_workspaces\` shows them): its router answers, and the answer comes back to you as a new message for the same thread. For a decision only an owner can make privately, \`send_dm\` them; the reply comes back the same way. Otherwise ask through your thread as usual.
+- A task that asks for recurring work ("every morning…"): set it up with \`schedule\`, passing the message id of the owner's words the task quotes (only owners can); \`list_schedules\` and \`unschedule\` manage the workspace's jobs.
 - No "starting", plan or progress notes. On a task that runs for a long time, at most one short milestone.`
 }
 

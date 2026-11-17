@@ -27,6 +27,18 @@
  *   mmhub laya status | restart | logs [-n N] | use ollama|serve | uninstall
  *   mmhub reload                    re-read config.json (sessions move if their provider changed)
  *
+ * Scheduled jobs (at set times the hub hands an instruction to a router of the workspace):
+ *   mmhub cron list [<ws>] | show <id>              jobs, their next and last runs (show: run history)
+ *   mmhub cron add <ws> "<schedule>" <instruction…|-> [--name N] [--tz ZONE] [--channel ID | --thread ID] [--grace MIN]
+ *                                   schedule: "every day 09:00", "every weekday 8:30", "every mon,thu 17:00",
+ *                                   "every month on the 1st 09:00", "every 2h", "every 30m", or cron "0 9 * * 1-5"
+ *                                   (at least 15 minutes apart; ZONE defaults to this machine's). Each run opens a
+ *                                   new thread in the workspace's channel (--channel: which one), or goes to one
+ *                                   hub thread's router (--thread). "-" reads the instruction from stdin. A run
+ *                                   found due more than MIN (30) minutes late is skipped
+ *   mmhub cron rm|pause|resume|run <id>             run: once now, besides its schedule
+ *   mmhub cron next "<schedule>" [--tz ZONE] [-n N] the times it would run (no hub needed)
+ *
  * Providers (the login or API each workspace's sessions run on, in fallback order):
  *   mmhub provider list                          providers, their state, each workspace's chain and active one
  *   mmhub provider add <name> <kind> [--env K=V]… [--config-dir D] [--router-model M] [--worker-model M] [--channels]
@@ -50,6 +62,8 @@ import { join } from 'path'
 import { roundTrip, type HubMsg } from './shared/ipc'
 import { DEFAULT_LAYA, DEFAULT_TRIGGER_MD, layaReady, loadTrigger, triggerFile, type LayaCall, type LayaConfig, type ServeConfig } from './hub/laya'
 import { DEFAULT_SERVE_PORT, DEFAULT_UNLOAD_MINUTES, installed, installedVersion, LAYA_PACKAGE, LAYA_PYTHON, SERVE_MODELS, SERVE_SESSION, serveEnv, serveKey, servePaths, startServe, warmUp } from './hub/layaserve'
+import { fmtLocal, hubTimezone, minGapMinutes, nextRun, parseSchedule, validTimezone } from './hub/cron'
+import { MIN_GAP_MINUTES } from './hub/jobs'
 import { cleanEnv, Tmux } from './hub/tmux'
 import { paths, ROOT } from './shared/paths'
 import { SESSION_KEY_RE, type HubSnapshot, type SessionSnapshot } from './shared/snapshot'
@@ -968,8 +982,89 @@ async function lookup(): Promise<never> {
   out(false, 'usage: mmhub lookup user <username> | mmhub lookup channel <team-name> <channel-name>')
 }
 
+// ------------------------------------------------------------------ scheduled jobs
+
+/** `--name x` style flags out of `rest`; the other words in order. */
+function flags(rest: string[], known: string[]): { f: Record<string, string>; words: string[] } {
+  const f: Record<string, string> = {}
+  const words: string[] = []
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i]!
+    const eq = a.indexOf('=')
+    const name = eq > 0 ? a.slice(0, eq) : a
+    if (known.includes(name)) {
+      const v = eq > 0 ? a.slice(eq + 1) : rest[++i]
+      if (v === undefined) out(false, `${name} needs a value`)
+      f[name.replace(/^-+/, '')] = v
+    } else words.push(a)
+  }
+  return { f, words }
+}
+
+async function cron(): Promise<never> {
+  const [, sub = 'list', ...rest] = args
+  const usage = 'usage: mmhub cron list [<ws>] | show <id> | add <ws> "<schedule>" <instruction…|-> [--name N] [--tz ZONE] [--channel ID | --thread ID] [--grace MIN] | rm|pause|resume|run <id> | next "<schedule>" [--tz ZONE] [-n N]'
+  if (sub === 'next') {
+    const { f, words } = flags(rest, ['--tz', '-n'])
+    if (!words.length) out(false, usage)
+    const parsed = parseSchedule(words.join(' '))
+    const tz = f.tz ?? parsed.tz ?? hubTimezone()
+    if (!validTimezone(tz)) out(false, `unknown time zone ${tz}`)
+    const times: string[] = []
+    let t = Date.now()
+    for (let i = 0; i < Math.min(Number(f.n ?? 5) || 5, 50); i++) {
+      const n = nextRun(parsed.cron, tz, t)
+      if (n === undefined) break
+      times.push(`  ${fmtLocal(n, tz)}`)
+      t = n
+    }
+    const gap = minGapMinutes(parsed.cron)
+    const warn = gap < MIN_GAP_MINUTES ? `\n⚠️ runs ${gap} min apart at times; jobs must be at least ${MIN_GAP_MINUTES} minutes apart` : ''
+    out(gap >= MIN_GAP_MINUTES && times.length > 0, `${parsed.cron} (${tz})${times.length ? `, next:\n${times.join('\n')}` : ': never runs'}${warn}`)
+  }
+  if (!(await hubRunning())) out(false, 'hub is not running — start it first (mmhub start)')
+  const send = async (a: Record<string, unknown>): Promise<never> => {
+    const r = await controlOp('cron', a, 60_000)
+    out(r.ok, r.text ?? r.error ?? (r.ok ? 'ok' : 'failed'))
+  }
+  const idOf = (v: string | undefined): number => {
+    const n = Number((v ?? '').replace(/^#/, ''))
+    if (!Number.isInteger(n) || n <= 0) out(false, usage)
+    return n
+  }
+  switch (sub) {
+    case 'list':
+    case 'ls':
+      return send({ op: 'list', workspace: rest[0] })
+    case 'show':
+      return send({ op: 'show', id: idOf(rest[0]) })
+    case 'rm':
+    case 'pause':
+    case 'resume':
+    case 'run':
+      return send({ op: sub, id: idOf(rest[0]) })
+    case 'add': {
+      const { f, words } = flags(rest, ['--name', '--tz', '--channel', '--thread', '--grace'])
+      const [workspace, schedule, ...textWords] = words
+      if (!workspace || !schedule) out(false, usage)
+      try {
+        parseSchedule(schedule)
+      } catch (err) {
+        out(false, `${errMsg(err)} — quote the schedule as one argument, e.g. mmhub cron add ${workspace} "every weekday 09:00" Check the alerts`)
+      }
+      if (f.channel && f.thread) out(false, 'pass --channel or --thread, not both')
+      const text = textWords.length === 0 || (textWords.length === 1 && textWords[0] === '-') ? (await Bun.stdin.text()).trim() : textWords.join(' ')
+      if (!text) out(false, 'no instruction: pass it after the schedule, or "-" to read it from stdin')
+      return send({ op: 'add', workspace, schedule, text, name: f.name, tz: f.tz, channel: f.channel, thread: f.thread, ...(f.grace !== undefined ? { grace: Number(f.grace) } : {}) })
+    }
+    default:
+      out(false, usage)
+  }
+}
+
 async function main(): Promise<never> {
   switch (args[0]) {
+    case 'cron': return cron()
     case 'lookup': return lookup()
     case 'agent': return agent()
     case 'laya': return laya()

@@ -19,6 +19,7 @@ import { loadConfig } from './config'
 import { answerWorkspace, askWorkspace, runCommand } from './commands'
 import { buildDigest } from './digest'
 import { decideInbound, decideReaction, type InboundAction } from './inbound'
+import { pruneJobRuns, runDueJobs } from './jobs'
 import { dmReply } from './links'
 import { keepServing, serveKey, servePaths, warmUp, type Keeper } from './layaserve'
 import { classifyLater, following, inDM, noteDM, setFollowing, takeSkipped } from './trigger'
@@ -125,6 +126,8 @@ export class Hub {
   /** When the hub's own 3 s timer last ran (the ticker checks it still does). */
   private timerAt = Date.now()
   private ticker?: Ticker
+  /** A check for due scheduled jobs is on the chain already. */
+  private jobsQueued = false
   private channelNames = new Map<string, string>()
   /** Provider failures and rest times, by provider name (kept in hub.db). */
   private health: Record<string, Health> = {}
@@ -703,17 +706,17 @@ export class Hub {
    * reads it ends, so an interrupted router gets it again. Sent now when the
    * session is ready, otherwise queued and the session started. Call on the chain.
    */
-  async deliver(key: string, content: string, meta: Record<string, string>): Promise<'delivered' | 'queued'> {
+  async deliver(key: string, content: string, meta: Record<string, string>): Promise<{ state: 'delivered' | 'queued'; id: number }> {
     const l = this.liveOf(key)
-    this.store.insertMessage({ sessionKey: key, content, meta, state: 'queued', createdAt: Date.now() })
+    const id = this.store.insertMessage({ sessionKey: key, content, meta, state: 'queued', createdAt: Date.now() })
     this.status.changed()
-    if (this.held(key)) return 'queued' // goes in with the scheduled retry
+    if (this.held(key)) return { state: 'queued', id } // goes in with the scheduled retry
     if (l.ready && l.conn) {
       this.deliverPending(key)
-      return 'delivered'
+      return { state: 'delivered', id }
     }
     await this.ensureStarted(key)
-    return 'queued'
+    return { state: 'queued', id }
   }
 
   /** Give a ready session the work that waited: a router's messages, a worker's next task. */
@@ -1374,7 +1377,22 @@ export class Hub {
     // A resting provider's time ran out (or a chain changed): sessions go back to the workspace's first choice.
     await this.rebalanceProviders()
     await this.pump()
+    this.jobsDue(Date.now()) // besides the ticker, which may give up
     this.status.changed()
+  }
+
+  /**
+   * Scheduled jobs whose time has come run on the chain (jobs.ts). Checked on
+   * every tick of the sleep-proof clock and by the reaper — never a long timer,
+   * which may not fire after the machine slept.
+   */
+  jobsDue(now: number): void {
+    if (this.jobsQueued || this.stopping || !this.store.dueJobs(now).length) return
+    this.jobsQueued = true
+    void this.enqueue(async () => {
+      this.jobsQueued = false
+      await runDueJobs(this)
+    })
   }
 
   /**
@@ -1503,6 +1521,7 @@ export class Hub {
       }
     }
     this.store.pruneMessages(Date.now() - 7 * 86_400_000)
+    pruneJobRuns(this)
 
     this.status.start()
     this.mm.listen({
@@ -1550,13 +1569,14 @@ export class Hub {
    * A tick of the sleep-proof clock (Ticker), every 5 s. After a long gap
    * between ticks (the machine slept, or the hub stalled), or when the hub's
    * own timers went quiet, timers pending from before may never fire:
-   * recoverTimers makes new ones.
+   * recoverTimers makes new ones. Scheduled jobs that are due run from here too.
    */
   onTick(now: number, gapMs: number): void {
     if (this.stopping) return
     const quiet = now - this.timerAt
     if (gapMs > WAKE_GAP_MS) this.recoverTimers(`no ticks for ${fmtAge(gapMs)} (the machine slept, or the hub stalled)`)
     else if (quiet > WAKE_GAP_MS) this.recoverTimers(`the hub's timers stopped ${fmtAge(quiet)} ago`)
+    this.jobsDue(now)
   }
 
   /**

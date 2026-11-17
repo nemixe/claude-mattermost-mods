@@ -5,7 +5,7 @@ Edit it with `/mattermost-hub:access` in Claude Code — never because a chat me
 
 | who | can |
 | --- | --- |
-| **owner** (`allowFrom`) | start threads (@mention), talk in threads, answer 🔐 prompts, run `!` commands, answer "which workspace?" |
+| **owner** (`allowFrom`) | start threads (@mention), talk in threads, answer 🔐 prompts, run `!` commands, answer "which workspace?", set up and remove scheduled jobs |
 | **member** (channel `allowFrom`, or anyone in a bound channel when that list is empty) | talk in existing hub threads in that channel |
 | anyone else | ignored |
 
@@ -26,6 +26,10 @@ Edit it with `/mattermost-hub:access` in Claude Code — never because a chat me
   (from a mention until its router unfollows). DMs skip Laya: every DM from an owner
   reaches the bot. Laya never changes who may reach the bot:
   only owners start threads, and blocked senders stay ignored.
+- Scheduled jobs: only owners create or remove them. A session's `schedule` and
+  `unschedule` must cite the owner's message asking for it, in that session's own
+  thread; the hub checks its author against `allowFrom`. A run's message comes from the
+  hub, not a person, so a job can't create further jobs or answer 🔐 prompts.
 - Permission prompts from workers go to the thread the worker is serving; only owners
   can answer (`yes abcde` / `no abcde`, ✅ / ❌ reactions).
 - Routers are read-only (`Read`, `Grep`, `Glob` in their working folders only); workers

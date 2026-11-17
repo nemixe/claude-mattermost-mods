@@ -15,6 +15,8 @@ import { paths } from '../src/shared/paths'
 import { loadConfig } from '../src/hub/config'
 import { Hub, type BridgeConn } from '../src/hub/hub'
 import { delegate, handleCall, ToolError } from '../src/hub/tools'
+import { control } from '../src/hub/control'
+import { addJob, runDueJobs } from '../src/hub/jobs'
 import { RETRY_DELAYS } from '../src/hub/lifecycle'
 import type { Mattermost, MMPost } from '../src/hub/mattermost'
 import { tmuxName, transcriptPath } from '../src/hub/spawn'
@@ -92,6 +94,11 @@ function setup(config: Record<string, unknown> = {}, before?: (stateDir: string)
     userByName: async (name: string) => (name === 'dave' ? { id: 'U9', username: 'dave' } : undefined),
     channel: async (id: string) => ({ id, type: 'O', name: id, display_name: id }),
     directChannel: async () => ({ id: 'D1', type: 'D', name: 'BOT__U1', display_name: '' }),
+    getPost: async (id: string) => {
+      const x = others.find(o => o.id === id) ?? posts.find(o => o.id === id)
+      if (!x) throw new Error(`404 ${id}`)
+      return { root_id: '', channel_id: 'C1', user_id: 'bot', create_at: 0, ...x } as MMPost
+    },
     getThread: async (root: string) => ({
       posts: Object.fromEntries([
         ...posts.filter(x => x.id === root || x.root_id === root).map((x, i) => [x.id, { ...x, user_id: 'bot', create_at: i, props: {} }] as const),
@@ -852,5 +859,177 @@ describe('Laya decides what reaches the bot', () => {
     } finally {
       laya.stop(true)
     }
+  }, T)
+})
+
+describe('scheduled jobs', () => {
+  /** Workspace demo bound to C1, owner U1 (alice); a router in thread T2 where alice and bob talk. */
+  function scene() {
+    const env = setup({}, dir => {
+      writeFileSync(join(dir, 'access.json'), JSON.stringify({ dmPolicy: 'allowlist', allowFrom: ['U1'], channels: {}, pending: {} }))
+    })
+    const { hub, p, w, others } = env
+    hub.bot = { id: 'BOT', username: 'claude' }
+    bindChannel(p.bindings, 'C1', 'demo')
+    const rkey = hub.createRouter({ threadId: 'T2', channelId: 'C1', workspace: w, label: 'ops talk' })
+    const msg = (id: string, user: string, message: string, root = 'T2') =>
+      ({ id, root_id: root, user_id: user, channel_id: 'C1', message, create_at: Date.now(), props: {} }) as unknown as MMPost
+    others.push(msg('M1', 'U1', 'Every weekday at 9, check the alerts dashboard'), msg('M2', 'U2', 'and every 5 minutes ping me'))
+    return { ...env, rkey, msg }
+  }
+
+  test("an owner's request through a router; each run opens a new thread with its own router, never twice, never piled up", async () => {
+    const { hub, tmux, posts, rkey } = scene()
+    // Owners only, at least 15 minutes apart, a message from the session's own thread.
+    await expect(handleCall(hub, rkey, 'schedule', { schedule: 'every weekday 09:00', text: 'x', message_id: 'M2' })).rejects.toThrow('only a hub owner')
+    await expect(handleCall(hub, rkey, 'schedule', { schedule: 'every 5m', text: 'x', message_id: 'M1' })).rejects.toThrow('at least 15 minutes apart')
+    await expect(handleCall(hub, rkey, 'schedule', { schedule: 'every weekday 09:00', text: 'x' })).rejects.toThrow('pass message_id')
+    expect(hub.store.jobs()).toEqual([])
+
+    const res = await handleCall(hub, rkey, 'schedule', {
+      schedule: 'every weekday 09:00 Asia/Jakarta', text: 'Check the alerts dashboard; post anything red.\nIf it is down, tell @channel.', message_id: 'M1', name: 'Morning alerts',
+    })
+    expect(res).toContain('scheduled job #1 "Morning alerts"')
+    const job = hub.store.job(1)!
+    expect(job).toMatchObject({ workspace: 'demo', schedule: 'every weekday 09:00', cron: '0 9 * * 1-5', tz: 'Asia/Jakarta', channelId: 'C1', createdBy: '@alice', origin: 'thread T2', paused: false })
+    expect(posts.at(-1)!.root_id).toBe('T2')
+    expect(posts.at(-1)!.message).toContain('⏰ @alice set up scheduled job #1 **Morning alerts**')
+    expect(await handleCall(hub, rkey, 'list_schedules', {})).toContain('#1 Morning alerts  [demo]')
+
+    // Not due yet: nothing. Due: a new thread in C1, and its own router gets the instruction.
+    const slot = job.nextAt!
+    const before = posts.length
+    expect(await hub.enqueue(() => runDueJobs(hub, slot - 1000))).toBe(0)
+    await hub.enqueue(() => runDueJobs(hub, slot + 2000))
+    const root = posts[before]!
+    expect(root.channel_id).toBe('C1')
+    expect(root.root_id).toBeUndefined()
+    expect(root.message).toContain('⏰ **Scheduled: Morning alerts** · job #1')
+    expect(root.message).toContain('> Check the alerts dashboard; post anything red.\n> If it is down, tell @\u200bchannel.')
+    const t = hub.store.thread(root.id)!
+    expect(t).toMatchObject({ workspace: 'demo', channelId: 'C1' })
+    const r = await connect(hub, tmux, t.routerKey, 1)
+    expect(r.got[0]!.meta).toMatchObject({ kind: 'scheduled', job_id: '1', thread_id: root.id, chat_id: 'C1', message_id: root.id })
+    expect(r.got[0]!.content).toContain('[Scheduled job #1 "Morning alerts"')
+    expect(r.got[0]!.content).toContain('Not a person')
+    expect(r.got[0]!.content).toContain('Check the alerts dashboard; post anything red.\nIf it is down, tell @channel.')
+    expect(hub.store.runs(1, 1)[0]).toMatchObject({ status: 'started', slot, threadId: root.id })
+
+    // The same time is never run twice (say the hub restarted before it moved on).
+    hub.store.patchJob(1, { nextAt: slot })
+    await hub.enqueue(() => runDueJobs(hub, slot + 3000))
+    expect(posts.length).toBe(before + 1)
+    expect(hub.store.job(1)!.nextAt).toBeGreaterThan(slot)
+
+    // The next time comes while that run is still being worked on: skipped.
+    const slot2 = hub.store.job(1)!.nextAt!
+    await hub.enqueue(() => runDueJobs(hub, slot2 + 1000))
+    expect(posts.length).toBe(before + 1)
+    expect(hub.store.runs(1, 1)[0]).toMatchObject({ status: 'skipped', slot: slot2 })
+    expect(hub.store.runs(1, 1)[0]!.note).toContain('the run before is still waiting or being worked on')
+
+    // An owner stopped that router: its message waits for them, and doesn't hold up the time after.
+    await hub.enqueue(() => hub.close(t.routerKey, 'manual'))
+    expect(hub.store.messageState(hub.store.runs(1, 2)[1]!.inboxId!)).toBe('interrupted')
+    const slot3 = hub.store.job(1)!.nextAt!
+    await hub.enqueue(() => runDueJobs(hub, slot3 + 1000))
+    expect(posts.length).toBe(before + 2)
+    expect(posts.at(-1)!.message).not.toContain('@channel')
+    const t2 = hub.store.thread(posts.at(-1)!.id)!
+    expect(t2.routerKey).not.toBe(t.routerKey)
+    await connect(hub, tmux, t2.routerKey, 2)
+
+    // Removed by an owner, through the router.
+    await expect(handleCall(hub, rkey, 'unschedule', { job_id: 1, message_id: 'M2' })).rejects.toThrow('only a hub owner')
+    expect(await handleCall(hub, rkey, 'unschedule', { job_id: '#1', message_id: 'M1' })).toContain('removed job #1')
+    expect(hub.store.jobs()).toEqual([])
+    expect(posts.at(-1)!.message).toContain('🗑 @alice removed scheduled job #1 **Morning alerts**')
+  }, T)
+
+  test('missed while the hub was down or the machine asleep: run once within the grace, skipped beyond it', async () => {
+    const { hub, posts } = scene()
+    const daily = await hub.enqueue(() => addJob(hub, { workspace: 'demo', schedule: 'every day 09:00', text: 'Daily report', createdBy: 'mmhub cli', origin: 'cli' }))
+    // Found two days and three hours late: skipped and recorded, nothing posted.
+    const late = daily.nextAt! + 2 * 86_400_000 + 3 * 3_600_000
+    await hub.enqueue(() => runDueJobs(hub, late))
+    expect(posts).toEqual([])
+    const missed = hub.store.runs(daily.id, 1)[0]!
+    expect(missed.status).toBe('missed')
+    expect(missed.note).toContain('found 3h late')
+    expect(missed.note).toContain('2 earlier time(s) missed too')
+    expect(hub.store.job(daily.id)!.nextAt).toBeGreaterThan(late)
+
+    // Three times came and went, the latest 10 minutes ago: it runs once.
+    const often = await hub.enqueue(() => addJob(hub, { workspace: 'demo', schedule: 'every 2h', text: 'Check the queue', createdBy: 'mmhub cli', origin: 'cli' }))
+    const now = often.nextAt! + 4 * 3_600_000 + 10 * 60_000
+    await hub.enqueue(() => runDueJobs(hub, now))
+    expect(posts.length).toBe(1)
+    const run = hub.store.runs(often.id, 1)[0]!
+    expect(run).toMatchObject({ status: 'started', slot: often.nextAt! + 4 * 3_600_000, note: '2 earlier time(s) missed' })
+    expect(hub.store.job(often.id)!.nextAt).toBe(often.nextAt! + 6 * 3_600_000)
+  }, T)
+
+  test("the ticker runs due jobs, but not while Mattermost is down; a job can go to one thread's router", async () => {
+    const { hub, tmux, posts, w } = scene()
+    const mm = hub.mm as unknown as { connected: boolean }
+    // Every run goes to this thread's router, which remembers the earlier ones.
+    const res = await control(hub, 'cron', { op: 'add', workspace: 'demo', schedule: 'every day 07:30', text: 'Compare with yesterday', thread: 'T2', name: 'Diff' }, () => {})
+    expect(res.ok).toBe(true)
+    expect(res.message).toContain('in thread T2')
+    expect((await control(hub, 'cron', { op: 'add', workspace: 'demo', schedule: 'every day 07:30', text: 'x', thread: 'nope' }, () => {})).message).toContain('not a hub thread of workspace demo')
+    expect((await control(hub, 'cron', { op: 'add', workspace: 'demo', schedule: 'every day 07:30', text: 'x', channel: 'C9' }, () => {})).message).toContain('not bound to workspace demo')
+
+    hub.store.patchJob(1, { nextAt: Date.now() - 1000 })
+    mm.connected = false
+    hub.onTick(Date.now(), 5000)
+    await hub.enqueue(() => undefined)
+    expect(posts).toEqual([])
+    mm.connected = true
+    hub.onTick(Date.now(), 5000)
+    await until('the job runs', () => hub.store.runs(1, 1).length === 1)
+    await hub.enqueue(() => undefined)
+    expect(posts.at(-1)).toMatchObject({ root_id: 'T2', message: '⏰ **Diff** (scheduled job #1) is running.' })
+    const rkey = hub.store.thread('T2')!.routerKey
+    const r = await connect(hub, tmux, rkey, 1)
+    expect(r.got[0]!.meta).toMatchObject({ kind: 'scheduled', job_id: '1', thread_id: 'T2' })
+    expect(r.got[0]!.content).toContain('Compare with yesterday')
+
+    // A worker sets one up from the owner's words its task quotes.
+    const wkey = hub.createWorker({ workspace: w, title: 'Ops', summary: 'ops' })
+    hub.store.patchWorker(wkey, { threads: ['T2'] })
+    expect(await handleCall(hub, wkey, 'schedule', { schedule: 'every mon 08:00', text: 'Weekly cost report', message_id: 'M1', in_this_thread: true })).toContain('scheduled job #2')
+    expect(hub.store.job(2)).toMatchObject({ threadId: 'T2', createdBy: '@alice', name: 'Weekly cost report' })
+    await expect(handleCall(hub, wkey, 'unschedule', { job_id: 2, message_id: 'X1' })).rejects.toThrow('no message X1')
+  }, T)
+
+  test('owners manage jobs in chat with !cron', async () => {
+    const { hub, tmux, posts, msg } = scene()
+    const say = async (text: string) => {
+      const n = posts.length
+      await hub.enqueue(() => hub.onPosted({ ...msg(`P${Math.random()}`, 'U1', text, ''), root_id: '' }, 'O'))
+      return posts.slice(n).map(p => p.message).join('\n')
+    }
+    expect(await say('@claude !cron')).toContain('No scheduled jobs in workspace demo')
+    expect(await say('@claude !cron add every weekday 09:00')).toContain('Usage: `!cron`')
+    expect(await say('@claude !cron add every 5m | ping')).toContain('⚠️ "every 5m" runs every 5 min')
+    const added = await say("@claude !cron add every weekday 08:00 Asia/Jakarta | Summarise yesterday's deploys\nand flag failures")
+    expect(added).toContain("⏰ Scheduled job #1 **Summarise yesterday's deploys and flag failures**: every weekday 08:00 (Asia/Jakarta)")
+    expect(hub.store.job(1)!.text).toBe("Summarise yesterday's deploys\nand flag failures")
+    expect(await say('@claude !cron')).toContain("**#1 Summarise yesterday's deploys and flag failures**")
+
+    expect(await say('@claude !cron pause 1')).toContain('⏸ Job #1')
+    expect(hub.store.dueJobs(Date.now() + 7 * 86_400_000)).toEqual([])
+    expect(await say('@claude !cron resume 1')).toContain('▶️ Job #1')
+    expect(hub.store.job(1)!.nextAt).toBeGreaterThan(Date.now())
+
+    const ran = await say('@claude !cron run 1')
+    expect(ran).toContain('▶️ Running job #1')
+    const root = posts.find(p => p.message.startsWith('⏰ **Scheduled:'))!
+    await connect(hub, tmux, hub.store.thread(root.id)!.routerKey, 1)
+    expect(hub.store.runs(1, 1)[0]).toMatchObject({ kind: 'manual', status: 'started', note: 'run now by @alice' })
+    expect(await say('@claude !cron show 1')).toContain('manual started')
+
+    expect(await say('@claude !cron rm 1')).toContain('🗑 Removed scheduled job #1')
+    expect(await say('@claude !cron rm 1')).toContain('⚠️ no job #1')
   }, T)
 })

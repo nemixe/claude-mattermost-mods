@@ -20,6 +20,9 @@ the official Telegram channel plugin does, but with many sessions:
   machine or hits an API error (overloaded, rate limit) resumes on its own and gets
   its unfinished task or message again. `restart` applies new settings without cutting
   off a running turn.
+- **Scheduled jobs.** "Every weekday at 9, check the alerts": at set times the hub
+  opens a thread and gives the workspace's router the instruction, so recurring work
+  runs without anyone posting (see [Scheduled jobs](#scheduled-jobs)).
 - **A panel in Claude Code** (`/mm`) listing workspaces and their live and stopped
   sessions, with Stop / Wake / Restart / Pin / Copy attach.
 
@@ -72,8 +75,11 @@ the `/mm` panel. The CLI is `bun ~/claude-mattermost-mods/bin/mmhub` (alias it t
   (not while it waits for a 🔐 answer or an API-error retry).
 - Worker permission prompts appear as 🔐 posts: owners reply `yes abcde` / `no abcde`
   or react ✅ / ❌. Pre-approve common commands in the workspace's `.claude/settings.json`.
+- `@claude every weekday at 9, check the alerts dashboard and post anything red` (an
+  owner) → a scheduled job; each run opens its own thread ([Scheduled jobs](#scheduled-jobs)).
 - Owner commands: `!ws`, `!workers`, `!wake [id]`, `!stop`, `!restart [id|all|workers|routers] [now]`,
-  `!pin [id]`, `!unpin [id]`, `!worker stop|rm <id>`, `!delegate <id|new> <task>`, `!help`.
+  `!pin [id]`, `!unpin [id]`, `!worker stop|rm <id>`, `!delegate <id|new> <task>`,
+  `!cron [add|show|rm|pause|resume|run …]`, `!help`.
 
 ## What gets posted
 
@@ -244,6 +250,68 @@ workspace it came through, and passes through at most two workspaces. Each sessi
 at most 10 requests or DMs an hour, and each one carries at most 60 messages. Running
 sessions get these tools at `mmhub session restart all`.
 
+## Scheduled jobs
+
+Recurring work that runs without anyone posting. A job has a schedule, a time zone, a
+workspace, where its runs go, and the instruction each run gets. Jobs live in `hub.db`.
+
+**Setting one up** (owners only):
+
+- Ask the bot in a thread: *"every weekday at 9, check the alerts dashboard and post
+  anything red"*. The router calls `schedule` with the id of the owner's message (a
+  worker can too, from the owner's words its task quotes). The hub checks that the
+  message is in that session's thread and that its author is an owner, then posts a ⏰
+  confirmation in the thread.
+- In chat: `!cron add every weekday 09:00 | check the alerts dashboard and post anything red`
+  (runs open threads in this channel).
+- In a terminal: `mmhub cron add <ws> "every weekday 09:00" Check the alerts…`
+  (`--channel`, `--thread`, `--name`, `--tz`, `--grace`; `-` reads the instruction from stdin).
+
+**Schedules:** `every day 09:00`, `every weekday 8:30`, `every weekend 10am`,
+`every mon,thu 17:00`, `every month on the 1st 09:00`, `every hour`, `every 2h [at :30]`,
+`every 30m`, `@daily`, or a 5-field cron expression (`0 9 * * 1-5`). Times are wall-clock
+times in the job's zone: a zone at the end (`… Asia/Jakarta`), `--tz`, or else the hub
+machine's. The zone is stored with the job, so moving the hub doesn't shift it. Runs are
+at least 15 minutes apart, a workspace has at most 20 jobs, and an instruction is at most
+4000 characters. `mmhub cron next "<schedule>"` shows the times a schedule gives.
+
+**A run** posts **⏰ Scheduled: <name>** (with the instruction) in the job's channel: a
+channel bound to its workspace, by default the one it was set up in. That thread gets a
+router of its own, which receives the instruction as a `kind="scheduled"` message. It
+handles it like a person's request (answers itself, or delegates to workers) and posts
+the outcome there, where people can reply as usual. A job can instead send every run to
+one existing hub thread (the `in_this_thread` option, `--thread`). That thread's router
+then remembers earlier runs ("compare with yesterday"). No session has to be running: the
+message goes through the router's inbox, which starts or resumes it like any message,
+within the session caps. When the pool is full, the run waits for a slot.
+
+**Reliability:**
+
+- The hub looks for due jobs on its 5-second tick (see [Lifecycle](#lifecycle)) and in
+  the reaper, never on a long timer.
+- Each due time gets one `job_runs` row per job and time, written together with the
+  job's next time before anything is posted. So a time never runs twice, even across a
+  crash or a restart.
+- A time found due more than its grace (30 min, `--grace`) late is skipped and logged.
+  That happens when the hub was down or the Mac asleep.
+- When several times were missed, the job runs once, for the latest, if that one is
+  within the grace.
+- A time whose previous run is still waiting or being worked on is skipped, so runs
+  never pile up.
+- While Mattermost is unreachable, due jobs wait, and the grace keeps counting.
+
+**Managing jobs:**
+
+- `!cron` lists the workspace's jobs. `!cron show|rm|pause|resume|run <id>` does the
+  rest, and so do `mmhub cron list|show|rm|pause|resume|run`.
+- Sessions have `list_schedules`, and `unschedule` when an owner asks.
+- A paused job skips its times. When it's resumed, it carries on from the next one.
+- `run` runs a job once now, besides its schedule.
+- `show` lists recent runs (started, skipped, missed, failed). Each skip and miss is in
+  `mmhub logs` too.
+
+Running sessions get the new tools and instructions at `mmhub session restart all`.
+
 ## Router persona
 
 How routers work with people is a short text added to their instructions. The first
@@ -296,6 +364,8 @@ mmhub agent install | uninstall                         # macOS: start the hub a
 mmhub laya install [--port N] [--device D] [--english-only] | status | restart | logs | use ollama|serve | uninstall
 mmhub provider list | add <name> <kind> [--env K=V]… | login <name> | secret <name> <VAR> | check <name>
 mmhub provider use <ws|--hub> <name>… | use <ws> --inherit | reset <name> | rm <name> [--purge]
+mmhub cron list [<ws>] | show <id> | rm|pause|resume|run <id> | next "<schedule>" [--tz ZONE] [-n N]
+mmhub cron add <ws> "<schedule>" <instruction…|-> [--name N] [--tz ZONE] [--channel ID | --thread ID] [--grace MIN]
 ```
 
 ## Configuration
@@ -382,7 +452,8 @@ the hub still answered `mmhub`). So the hub also takes a tick every 5 s from a c
 `sh` (`while sleep 5; do echo; done`), plain I/O that keeps working. After a gap of
 more than 30 s between ticks, or when its own timers go quiet, it re-arms its timers
 and scheduled retries, checks busy sessions' screens, and opens a new Mattermost
-socket, which catches up on posts missed meanwhile. A hub that still has no heartbeat
+socket, which catches up on posts missed meanwhile. [Scheduled jobs](#scheduled-jobs) are
+checked on these ticks, so a job never waits on a timer that slept. A hub that still has no heartbeat
 (`mmhub status` warns; the panel shows it down) is restarted by `mmhub start` or the
 panel's **Start hub**.
 
