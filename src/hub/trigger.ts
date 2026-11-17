@@ -12,6 +12,7 @@
  */
 
 import { errMsg, log } from '../shared/util'
+import type { Trigger } from './config'
 import type { Hub } from './hub'
 import type { InboundAction } from './inbound'
 import { judge, loadTrigger, MAX_PARTICIPANTS, mentionedNames, type ChatLine, type LayaCall, type LayaConfig, type Person } from './laya'
@@ -74,7 +75,12 @@ export function layaCall(hub: Pick<Hub, 'cfg' | 'p'>): LayaConfig & LayaCall {
 
 /** Not for the bot: the router learns how many it missed when the next message reaches it. */
 function passOver(hub: Hub, a: Classify): void {
-  const k = `skipped:${a.threadId}`
+  countSkipped(hub, a.threadId)
+}
+
+/** One more reply in this hub thread its router didn't get (Laya said no, or it lacked a mention under mention-only). */
+export function countSkipped(hub: Pick<Hub, 'store'>, threadId: string): void {
+  const k = `skipped:${threadId}`
   hub.store.set(k, String(Number(hub.store.get(k) ?? 0) + 1))
 }
 
@@ -142,10 +148,12 @@ async function mentioned(hub: Hub, text: string): Promise<Person[]> {
 }
 
 /** "(N messages … not for you)" for a router, once; empty when there were none. */
-export function takeSkipped(hub: Hub, threadId: string): string {
+export function takeSkipped(hub: Hub, threadId: string, trigger?: Trigger): string {
   const k = `skipped:${threadId}`
   const n = Number(hub.store.get(k) ?? 0)
   if (!n) return ''
   hub.store.set(k, '0')
-  return `(${n} earlier message(s) in this thread were judged not meant for you, so you didn't get them; fetch_thread shows them.)`
+  return trigger === 'mention-only'
+    ? `(${n} earlier message(s) in this thread didn't @mention you, so you didn't get them; fetch_thread shows them.)`
+    : `(${n} earlier message(s) in this thread were judged not meant for you, so you didn't get them; fetch_thread shows them.)`
 }

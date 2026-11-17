@@ -185,6 +185,28 @@ describe('decideReaction', () => {
   })
 })
 
+describe('trigger mention-only', () => {
+  const only = { trigger: 'mention-only' as const }
+  test('in a hub thread, only a reply that mentions the bot reaches it; the rest are counted', () => {
+    expect(decideInbound(input({ ...only, root: 'P0', knownThread: true, message: 'lunch?' }))).toEqual({ kind: 'ignore', reason: 'no mention (trigger mention-only)', passOver: 'P0' })
+    expect(decideInbound(input({ ...only, root: 'P0', knownThread: true, user: MEMBER, access: access({ channels: { C1: { allowFrom: [] } } }), message: 'me too' })).kind).toBe('ignore')
+    expect(decideInbound(input({ ...only, root: 'P0', knownThread: true, message: '@claude is it green?' }))).toMatchObject({ kind: 'message', threadId: 'P0' })
+  })
+  test('top-level posts need a mention even where the channel does not ask for one', () => {
+    const a = access({ channels: { C1: { allowFrom: [], requireMention: false } } })
+    expect(decideInbound(input({ access: a, message: 'hello' })).kind).toBe('start')
+    expect(decideInbound(input({ ...only, access: a, message: 'hello' }))).toEqual({ kind: 'ignore', reason: 'no mention (trigger mention-only)' })
+  })
+  test('DMs, prompt answers and ! commands need no mention', () => {
+    expect(decideInbound(input({ ...only, channelType: 'D', message: 'hi' })).kind).toBe('start')
+    expect(decideInbound(input({ ...only, root: 'P0', knownThread: true, message: 'yes abcde' })).kind).toBe('permission')
+    expect(decideInbound(input({ ...only, root: 'P0', knownThread: true, message: '!ws' })).kind).toBe('command')
+  })
+  test('trigger mention (the default) still takes every reply in its threads', () => {
+    expect(decideInbound(input({ trigger: 'mention', root: 'P0', knownThread: true, message: 'lunch?' })).kind).toBe('message')
+  })
+})
+
 describe('allowFrom "*"', () => {
   const all = access({ allowFrom: ['*'] })
   const botPost = (p: Partial<InboundInput> & { message?: string; user?: string; root?: string }, props: Record<string, unknown>) => {

@@ -104,7 +104,18 @@ Either way the change reaches running sessions at `mmhub session restart all`.
 ## Answering without a mention (Laya)
 
 By default a post must @mention the bot to start a thread, and every reply in the bot's
-threads reaches the thread's router. A workspace can instead let
+threads reaches the thread's router. To have the bot take only posts that @mention it,
+replies in its threads included, set the workspace's trigger to `mention-only`:
+
+```bash
+mmhub ws trigger <workspace> mention-only
+```
+
+DMs, answers to 🔐 prompts and `!` commands still need no mention, and when a mention
+does reach the router it is told how many replies it didn't get (`fetch_thread` shows
+them). `mmhub ws trigger <workspace> mention` goes back to the default.
+
+A workspace can instead let
 [Laya](https://ollama.com/library/laya) decide which replies are for the bot. Laya is a
 small decision model (421M, Apache-2.0) that runs locally in Ollama:
 

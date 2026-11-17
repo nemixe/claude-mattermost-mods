@@ -13,7 +13,7 @@
  *                                   after the current turn ends (default), or right away (--now)
  *   mmhub ws list | create <name> [description] | bind <ws> <channel-id> | unbind <channel-id> | show <name>
  *   mmhub ws template               path of <workspacesDir>/workspace-template (created if missing)
- *   mmhub ws trigger <ws> [mention|laya|inherit]
+ *   mmhub ws trigger <ws> [mention|mention-only|laya|inherit]
  *                                   which replies in the bot's threads reach it: all (mention), or in
  *                                   threads it follows, those Laya judges meant for it (TRIGGER.md rules)
  *   mmhub repo add <ws> <path|git-url> [--name <n>] | rm <ws> <name>
@@ -69,7 +69,7 @@ import { paths, ROOT } from './shared/paths'
 import { SESSION_KEY_RE, type HubSnapshot, type SessionSnapshot } from './shared/snapshot'
 import { errMsg, fmtAge, isPidAlive, readEnvFile, readJson, writeJsonAtomic } from './shared/util'
 import { Database } from 'bun:sqlite'
-import { loadConfig } from './hub/config'
+import { isTrigger, loadConfig } from './hub/config'
 import { routerPersona } from './hub/prompts'
 import {
   buildLaunch, chooseProvider, configDirOf, cooling, DEFAULT_PROVIDER, deleteSecret, ensureConfigDir, HUB_LIST, isKind, KINDS, loadProviders,
@@ -404,14 +404,15 @@ async function ws(): Promise<never> {
     }
     case 'trigger': {
       const w = a1 ? loadWorkspace(cfg, a1) : undefined
-      if (!w) out(false, a1 ? `no workspace ${a1}` : 'usage: mmhub ws trigger <workspace> [mention|laya|inherit]')
+      if (!w) out(false, a1 ? `no workspace ${a1}` : 'usage: mmhub ws trigger <workspace> [mention|mention-only|laya|inherit]')
       const [want] = rest
       if (want === undefined) {
         const t = effective(cfg, w).trigger
         out(true, `workspace ${w.name}: ${t}${w.trigger ? '' : ' (from config.json)'}${t === 'laya' ? `; rules ${loadTrigger(w.dir).own ? triggerFile(w.dir) : 'built-in'}` : ''}`)
       }
-      if (want !== 'mention' && want !== 'laya' && want !== 'inherit') out(false, 'usage: mmhub ws trigger <workspace> [mention|laya|inherit]')
+      if (want !== 'inherit' && !isTrigger(want)) out(false, 'usage: mmhub ws trigger <workspace> [mention|mention-only|laya|inherit]')
       const after = effective(cfg, setWorkspaceTrigger(cfg, w.name, want === 'inherit' ? undefined : want)).trigger
+      if (after === 'mention-only') out(true, `workspace ${w.name}: only posts that @mention the bot reach it, replies in its threads too (DMs, 🔐 answers and ! commands need none)`)
       if (after !== 'laya') out(true, `workspace ${w.name}: posts need an @mention to start a thread; every reply in the bot's threads reaches it`)
       let made = ''
       if (!existsSync(triggerFile(w.dir))) {

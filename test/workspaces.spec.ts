@@ -2,13 +2,13 @@ import { describe, expect, test } from 'bun:test'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { DEFAULT_CONFIG, type HubConfig } from '../src/hub/config'
+import { DEFAULT_CONFIG, isTrigger, loadConfig, type HubConfig } from '../src/hub/config'
 import { DEFAULT_ROUTER_PERSONA, routerContext, routerPersona, routerPrompt, workerContext, workerPrompt } from '../src/hub/prompts'
 import { buildSnapshot } from '../src/hub/status'
 import type { SessionRow } from '../src/hub/store'
 import {
   addRepo, bindChannel, channelsOf, createWorkspace, effective, ensureTemplate, externalRepoPaths, listWorkspaces, loadBindings, loadWorkspace,
-  prepareWorktree, removeWorktrees, TEMPLATE_DIR, unbindChannel, validName,
+  prepareWorktree, removeWorktrees, setWorkspaceTrigger, TEMPLATE_DIR, unbindChannel, validName,
 } from '../src/hub/workspaces'
 
 function setup(): { cfg: HubConfig; root: string } {
@@ -90,6 +90,22 @@ describe('workspaces', () => {
     expect(channelsOf(loadBindings(f), 'demo').sort()).toEqual(['C1', 'C2'])
     expect(unbindChannel(f, 'C2')).toBe(true)
     expect(unbindChannel(f, 'C2')).toBe(false)
+  })
+})
+
+describe('trigger setting', () => {
+  test('mention-only is kept in workspace.json and config.json; anything unknown falls back', () => {
+    const { cfg, root } = setup()
+    createWorkspace(cfg, 'acme')
+    expect(effective(cfg, setWorkspaceTrigger(cfg, 'acme', 'mention-only')).trigger).toBe('mention-only')
+    expect(effective(cfg, setWorkspaceTrigger(cfg, 'acme', undefined)).trigger).toBe('mention')
+    const file = join(root, 'config.json')
+    writeFileSync(file, JSON.stringify({ trigger: 'mention-only' }))
+    expect(loadConfig(file).trigger).toBe('mention-only')
+    writeFileSync(file, JSON.stringify({ trigger: 'sometimes' }))
+    expect(loadConfig(file).trigger).toBe('mention')
+    expect(isTrigger('laya')).toBe(true)
+    expect(isTrigger('always')).toBe(false)
   })
 })
 

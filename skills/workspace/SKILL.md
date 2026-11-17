@@ -1,6 +1,6 @@
 ---
 name: workspace
-description: Manage Mattermost hub workspaces — create one, bind channels to it, add or remove repos, edit its CLAUDE.md and knowledge, set per-workspace models, idle timeouts and Claude Code providers (its own login or key, with fallback), choose which other workspaces may send it requests, let the Laya model decide when the bot answers without an @mention (TRIGGER.md rules), set up scheduled jobs (recurring instructions to its router, "cron"), see its sessions. Use when the user asks to create a workspace, connect a channel or repo, give a workspace its own Claude login or API key, set its fallback providers, limit which workspaces can ask it, make the bot answer without being mentioned, edit its trigger rules, schedule recurring work or a cron job for the bot, or change how a workspace's sessions run.
+description: Manage Mattermost hub workspaces — create one, bind channels to it, add or remove repos, edit its CLAUDE.md and knowledge, set per-workspace models, idle timeouts and Claude Code providers (its own login or key, with fallback), choose which other workspaces may send it requests, let the Laya model decide when the bot answers without an @mention (TRIGGER.md rules) or have it answer only when @mentioned (mention-only), set up scheduled jobs (recurring instructions to its router, "cron"), see its sessions. Use when the user asks to create a workspace, connect a channel or repo, give a workspace its own Claude login or API key, set its fallback providers, limit which workspaces can ask it, make the bot answer without being mentioned, make it answer only when mentioned (stop replying to every message in its threads), edit its trigger rules, schedule recurring work or a cron job for the bot, or change how a workspace's sessions run.
 user-invocable: true
 allowed-tools:
   - Read
@@ -58,9 +58,14 @@ Arguments passed: `$ARGUMENTS`
 - **`set <workspace> <key> <value>`**: edit `workspace.json` — `routerModel`, `workerModel`,
   `workerPermissionMode`, `idleMinutes.router`, `idleMinutes.worker`, `baseRef`, `description`,
   `acceptFrom`, `trigger`. Read, change, write (2-space JSON). New and resumed sessions pick it up.
-- **`trigger <workspace> [mention|laya|inherit]`**: which replies in the bot's threads
+- **`trigger <workspace> [mention|mention-only|laya|inherit]`**: which replies in the bot's threads
   reach it. `mention` (default): an @mention starts a thread, and every reply in it
-  reaches the router. `laya`: the bot follows a thread from its first mention until the
+  reaches the router, mentioned or not. `mention-only`: only posts that @mention the bot
+  reach it, replies in its own threads too; the router is told how many it didn't get
+  when the next mention reaches it, and asks people to mention it when they answer.
+  DMs, 🔐 answers (`yes abcde`, ✅/❌) and `!` commands need no mention. Pick it when
+  people talk among themselves in the bot's threads and want it to stay quiet. Running
+  sessions learn about it at `mmhub session restart all`. `laya`: the bot follows a thread from its first mention until the
   router calls `unfollow` (request done) or an owner sends `!unfollow`. While followed,
   a reply from the one person who shares the thread with the bot always reaches it
   (unless it @mentions someone else). With more people, the local Laya model judges

@@ -662,6 +662,37 @@ describe('cross-workspace requests and DMs', () => {
   }, T)
 })
 
+describe('trigger mention-only', () => {
+  test('a reply without a mention never reaches the router; the next mention does, and says how many it missed', async () => {
+    const { hub, tmux, w, p } = setup({}, dir => {
+      writeFileSync(join(dir, 'access.json'), JSON.stringify({ dmPolicy: 'allowlist', allowFrom: ['*'], channels: {}, pending: {} }))
+    })
+    hub.bot = { id: 'BOT', username: 'hubbot' }
+    setWorkspaceTrigger(loadConfig(p.config), 'demo', 'mention-only')
+    bindChannel(p.bindings, 'C1', 'demo')
+    const rkey = hub.createRouter({ threadId: 'T3', channelId: 'C1', workspace: w, label: 'thread three' })
+    const post = (id: string, user: string, message: string) => ({ id, root_id: 'T3', user_id: user, channel_id: 'C1', message, create_at: Date.now() }) as MMPost
+    const send = (id: string, user: string, message: string) => hub.enqueue(() => hub.onPosted(post(id, user, message), 'O'))
+
+    await send('M1', 'U1', 'lunch at noon?')
+    await send('M2', 'U2', 'sure, and is the build green?')
+    expect(hub.store.get('skipped:T3')).toBe('2')
+    expect(tmux.launches.length).toBe(0)
+
+    await send('M3', 'U1', '@hubbot is the build green?')
+    const rb = await connect(hub, tmux, rkey, 1)
+    await until('M3 reaches the router', () => rb.got.length === 1)
+    expect(rb.got[0]!.content).toContain("2 earlier message(s) in this thread didn't @mention you")
+    expect(rb.got[0]!.content).toContain('@hubbot is the build green?')
+    expect(hub.store.get('skipped:T3')).toBe('0')
+
+    // The router is told people must mention it.
+    expect(hub.hookContext(rkey)).toContain('only messages that @mention you reach you')
+    // Nothing to follow or unfollow.
+    expect(await handleCall(hub, rkey, 'unfollow', { thread_id: 'T3' })).toContain('trigger mention-only')
+  }, T)
+})
+
 describe('Laya decides what reaches the bot', () => {
   test('in threads the bot follows (from a mention until the router unfollows), by its judgement; workers keep the rules', async () => {
     let answer = 0.2

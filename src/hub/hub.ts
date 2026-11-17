@@ -22,7 +22,7 @@ import { decideInbound, decideReaction, type InboundAction } from './inbound'
 import { pruneJobRuns, runDueJobs } from './jobs'
 import { dmReply } from './links'
 import { keepServing, serveKey, servePaths, warmUp, type Keeper } from './layaserve'
-import { classifyLater, following, inDM, noteDM, setFollowing, takeSkipped } from './trigger'
+import { classifyLater, countSkipped, following, inDM, noteDM, setFollowing, takeSkipped } from './trigger'
 import { canRestartNow, classifyFailure, dueForIdleClose, isLive, looksBusy, noticeForRetry, pickEvictee, planStart, RestartBudget, retryDelay, type ReapView } from './lifecycle'
 import type { Mattermost, MMPost, MMReaction } from './mattermost'
 import { answeredText, PermissionDesk, promptText, staleText } from './permissions'
@@ -1181,6 +1181,7 @@ export class Hub {
   async act(a: InboundAction, post: MMPost, channelType: string): Promise<void> {
     switch (a.kind) {
       case 'ignore':
+        if (a.passOver) countSkipped(this, a.passOver)
         return
       case 'pair': {
         const access = this.accessStore.load()
@@ -1277,7 +1278,8 @@ export class Hub {
     }
     const titles = Object.fromEntries(this.store.workers(t.workspace).map(w => [w.key, w.title]))
     const digest = buildDigest(this.store.postsSince(t.id, t.cursor, 'w-'), titles, Date.now())
-    const skipped = takeSkipped(this, t.id)
+    const tw = this.ws(t.workspace)
+    const skipped = takeSkipped(this, t.id, tw ? effective(this.cfg, tw).trigger : undefined)
     const content = [digest.text, skipped, post.message].filter(Boolean).join('\n\n')
     if (digest.cursor) this.store.setCursor(t.id, digest.cursor)
     await this.deliver(t.routerKey, content, meta)

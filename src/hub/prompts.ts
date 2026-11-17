@@ -123,8 +123,13 @@ function repoLines(w: Workspace): string {
   return w.repos.length ? w.repos.map(r => `- ${r.name}: ${r.path}`).join('\n') : '- (no repos yet — an owner adds them with `mmhub repo add`)'
 }
 
-/** How posts reach a workspace's sessions, when Laya decides (empty otherwise). */
+/** How posts reach a workspace's sessions, when Laya or mention-only decides (empty otherwise). */
 function triggerNote(w: Workspace, role: 'router' | 'worker', trigger: Trigger): string {
+  if (trigger === 'mention-only') {
+    return role === 'router'
+      ? `\n\nHow messages reach you (the current setting): in this workspace only messages that @mention you reach you, replies in your own threads too. DMs, answers to permission prompts and ! commands are the exceptions. So when you ask a person something, ask them to @mention you in their answer, or it won't reach you. A message may say that earlier ones in the thread didn't mention you: fetch_thread shows them when you need them.`
+      : `\n\nWhen the bot answers (the current setting): in this workspace only messages that @mention the bot reach it, replies in its threads too. When you need an answer from a person, your question should ask them to @mention the bot in their reply.`
+  }
   if (trigger !== 'laya') return ''
   const file = join(w.dir, 'TRIGGER.md')
   return role === 'router'

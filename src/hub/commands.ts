@@ -129,7 +129,9 @@ export async function runCommand(hub: Hub, a: Extract<InboundAction, { kind: 'co
         if (!thread) return say(`\`!${a.name}\` works inside a hub thread.`)
         if (inDM(hub, thread.id)) return say(`Nothing to ${a.name}: this is a DM, and every message here reaches me.`)
         const w = loadWorkspace(hub.cfg, thread.workspace)
-        if (!w || effective(hub.cfg, w).trigger !== 'laya') return say(`Workspace \`${thread.workspace}\` takes every reply in its threads (Laya is off), so there is nothing to ${a.name}.`)
+        const t = w ? effective(hub.cfg, w).trigger : 'mention'
+        if (t === 'mention-only') return say(`Workspace \`${thread.workspace}\` takes only messages that mention me (trigger mention-only), so there is nothing to ${a.name}.`)
+        if (t !== 'laya') return say(`Workspace \`${thread.workspace}\` takes every reply in its threads (Laya is off), so there is nothing to ${a.name}.`)
         const on = a.name === 'follow'
         if (following(hub, thread.id) !== on) setFollowing(hub, thread.id, on)
         return say(on

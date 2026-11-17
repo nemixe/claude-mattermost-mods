@@ -6,8 +6,18 @@ import { readJson } from '../shared/util'
 
 export type IdleMinutes = { router: number; worker: number }
 
-/** What makes the bot take a post in a workspace's channels: an @mention (default), or Laya's judgement (laya.ts). */
-export type Trigger = 'mention' | 'laya'
+/**
+ * What makes the bot take a post in a workspace's channels (DMs always reach it):
+ * - `mention` (default): an @mention starts a thread; every reply in the bot's threads reaches it.
+ * - `mention-only`: only posts that @mention the bot reach it, replies in its threads too.
+ * - `laya`: a mention starts or follows a thread; Laya judges the replies without one (laya.ts).
+ */
+export const TRIGGERS = ['mention', 'mention-only', 'laya'] as const
+export type Trigger = (typeof TRIGGERS)[number]
+
+export function isTrigger(x: unknown): x is Trigger {
+  return (TRIGGERS as readonly unknown[]).includes(x)
+}
 
 export type HubConfig = {
   workspacesDir: string
@@ -93,7 +103,7 @@ export function loadConfig(file: string): HubConfig {
     workspacesDir: expandHome(raw.workspacesDir ?? DEFAULT_CONFIG.workspacesDir),
     workerReports: raw.workerReports === 'thread' ? 'thread' : 'router',
     providers: Array.isArray(raw.providers) ? raw.providers.filter((n): n is string => typeof n === 'string') : undefined,
-    trigger: raw.trigger === 'laya' ? 'laya' : 'mention',
+    trigger: isTrigger(raw.trigger) ? raw.trigger : 'mention',
     laya: { ...DEFAULT_LAYA, ...(raw.laya ?? {}) },
   }
 }

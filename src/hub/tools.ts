@@ -414,7 +414,9 @@ export async function handleCall(hub: Hub, key: string, tool: string, a: Args): 
       const t = threadFor(hub, key, a)
       const w = hub.ws(t.workspace)
       if (inDM(hub, t.id)) return 'Nothing to do: this thread is a DM, and every message in a DM reaches you.'
-      if (!w || effective(hub.cfg, w).trigger !== 'laya') return 'Nothing to do: this workspace takes every reply in your threads (Laya is off).'
+      const trig = w ? effective(hub.cfg, w).trigger : 'mention'
+      if (trig === 'mention-only') return 'Nothing to do: in this workspace only messages that @mention you reach you (trigger mention-only).'
+      if (trig !== 'laya') return 'Nothing to do: this workspace takes every reply in your threads (Laya is off).'
       const open = hub.store.openTasksIn(t.id)
       if (open.length) {
         throw new ToolError(`work for this thread is still open (${open.map(x => `task #${x.id}, ${x.workerKey}: ${x.state}`).join('; ')}): unfollow once it is done and the person has the result`)
@@ -429,7 +431,7 @@ export async function handleCall(hub: Hub, key: string, tool: string, a: Args): 
       const on = effective(hub.cfg, w).trigger === 'laya'
       const state = on
         ? 'Laya is on for this workspace'
-        : 'This workspace takes @mentions only (Laya is off); the rules apply once an owner turns Laya on'
+        : `Laya is off for this workspace (trigger ${effective(hub.cfg, w).trigger}); the rules apply once an owner turns Laya on`
       const content = str(a, 'content', false)
       if (content === undefined) {
         const t = loadTrigger(w.dir)

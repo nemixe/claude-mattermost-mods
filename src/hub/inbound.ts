@@ -5,6 +5,7 @@
 
 import { PERMISSION_REPLY_RE } from '../shared/util'
 import { classifySender, isOwner, requiresMention, type Access, type SenderRole } from './access'
+import type { Trigger } from './config'
 import { isBotPost } from './mattermost'
 
 export type InboundPost = { id: string; root_id: string; user_id: string; channel_id: string; message: string; type?: string; props?: Record<string, unknown> }
@@ -26,15 +27,17 @@ export type InboundInput = {
    * The trigger of the workspace the post belongs to (its thread's, else its channel's).
    * With "laya", a reply without a mention in a hub thread the bot follows goes to Laya;
    * in a thread it no longer follows, only a mention reaches it (and follows it again).
+   * With "mention-only", only a post that @mentions the bot reaches it, in its threads too.
    * DMs ignore it: every DM reaches the bot.
    */
-  trigger?: 'mention' | 'laya'
+  trigger?: Trigger
   /** The hub thread is followed: the bot was mentioned in it and its router hasn't called unfollow since. Default true. */
   followed?: boolean
 }
 
 export type InboundAction =
-  | { kind: 'ignore'; reason: string }
+  /** `passOver`: a reply in that hub thread the router didn't get; it learns how many with the next one it does. */
+  | { kind: 'ignore'; reason: string; passOver?: string }
   | { kind: 'pair' }
   | { kind: 'permission'; behavior: 'allow' | 'deny'; code: string }
   | { kind: 'command'; name: string; args: string[]; threadId: string; role: SenderRole }
@@ -105,6 +108,12 @@ export function decideInbound(i: InboundInput): InboundAction {
 
   // The hub decides whether this post can answer an open question (same thread, or a plain message in the same chat).
   if (i.awaitingWorkspace && role === 'owner') return { kind: 'workspace_answer', threadId, text }
+
+  // mention-only: outside DMs a post reaches the bot only when it @mentions it, in the bot's threads too.
+  // (Prompt answers and ! commands are taken above.)
+  if (i.trigger === 'mention-only' && !isDM && !mentioned) {
+    return { kind: 'ignore', reason: 'no mention (trigger mention-only)', ...(i.knownThread ? { passOver: threadId } : {}) }
+  }
 
   if (i.knownThread) {
     const message = { kind: 'message' as const, threadId, text: raw, role }
