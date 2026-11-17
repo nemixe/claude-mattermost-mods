@@ -886,14 +886,17 @@ describe('scheduled jobs', () => {
     await expect(handleCall(hub, rkey, 'schedule', { schedule: 'every weekday 09:00', text: 'x' })).rejects.toThrow('pass message_id')
     expect(hub.store.jobs()).toEqual([])
 
+    const posted = posts.length
     const res = await handleCall(hub, rkey, 'schedule', {
       schedule: 'every weekday 09:00 Asia/Jakarta', text: 'Check the alerts dashboard; post anything red.\nIf it is down, tell @channel.', message_id: 'M1', name: 'Morning alerts',
     })
-    expect(res).toContain('scheduled job #1 "Morning alerts"')
+    expect(res).toContain('scheduled job #1 "Morning alerts" set up for @alice')
+    // The hub posts nothing: the session confirms it in its own words.
+    expect(posts.length).toBe(posted)
+    expect(res).toContain('Nothing was posted: confirm it to the person yourself with reply')
+    expect(res).toContain('`!cron rm 1`')
     const job = hub.store.job(1)!
     expect(job).toMatchObject({ workspace: 'demo', schedule: 'every weekday 09:00', cron: '0 9 * * 1-5', tz: 'Asia/Jakarta', channelId: 'C1', createdBy: '@alice', origin: 'thread T2', paused: false })
-    expect(posts.at(-1)!.root_id).toBe('T2')
-    expect(posts.at(-1)!.message).toContain('⏰ @alice set up scheduled job #1 **Morning alerts**')
     expect(await handleCall(hub, rkey, 'list_schedules', {})).toContain('#1 Morning alerts  [demo]')
 
     // Not due yet: nothing. Due: a new thread in C1, and its own router gets the instruction.
@@ -941,9 +944,12 @@ describe('scheduled jobs', () => {
 
     // Removed by an owner, through the router.
     await expect(handleCall(hub, rkey, 'unschedule', { job_id: 1, message_id: 'M2' })).rejects.toThrow('only a hub owner')
-    expect(await handleCall(hub, rkey, 'unschedule', { job_id: '#1', message_id: 'M1' })).toContain('removed job #1')
+    const beforeRemove = posts.length
+    const removed = await handleCall(hub, rkey, 'unschedule', { job_id: '#1', message_id: 'M1' })
+    expect(removed).toContain('removed job #1 "Morning alerts"')
+    expect(removed).toContain('Nothing was posted: tell the person yourself with reply')
     expect(hub.store.jobs()).toEqual([])
-    expect(posts.at(-1)!.message).toContain('🗑 @alice removed scheduled job #1 **Morning alerts**')
+    expect(posts.length).toBe(beforeRemove)
   }, T)
 
   test('missed while the hub was down or the machine asleep: run once within the grace, skipped beyond it', async () => {
@@ -988,11 +994,14 @@ describe('scheduled jobs', () => {
     hub.onTick(Date.now(), 5000)
     await until('the job runs', () => hub.store.runs(1, 1).length === 1)
     await hub.enqueue(() => undefined)
-    expect(posts.at(-1)).toMatchObject({ root_id: 'T2', message: '⏰ **Diff** (scheduled job #1) is running.' })
+    // In an existing thread the hub posts nothing: the router's reply is the run's only post.
+    expect(posts).toEqual([])
     const rkey = hub.store.thread('T2')!.routerKey
     const r = await connect(hub, tmux, rkey, 1)
     expect(r.got[0]!.meta).toMatchObject({ kind: 'scheduled', job_id: '1', thread_id: 'T2' })
+    expect(r.got[0]!.meta.message_id).toBeUndefined()
     expect(r.got[0]!.content).toContain('Compare with yesterday')
+    expect(r.got[0]!.content).toContain('The hub posts nothing for this run: your reply is all people see.')
 
     // A worker sets one up from the owner's words its task quotes.
     const wkey = hub.createWorker({ workspace: w, title: 'Ops', summary: 'ops' })

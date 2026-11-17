@@ -62,7 +62,7 @@ const common = (role: Role): Tool[] => [
   },
   {
     name: 'schedule',
-    description: `Set up a scheduled job when a hub owner asks for recurring work ("every weekday at 9, check the alerts"). At each time, the hub hands \`text\` to a router of this workspace as a kind="scheduled" message: in a new thread in the channel of the owner's message each run (default), or in that message's thread (in_this_thread: the router there remembers earlier runs). Owners only: pass message_id, the owner's message asking for it${role === 'worker' ? ' (your task quotes it)' : ''}. The hub confirms in the thread; don't repeat it.`,
+    description: `Set up a scheduled job when a hub owner asks for recurring work ("every weekday at 9, check the alerts"). At each time, the hub hands \`text\` to a router of this workspace as a kind="scheduled" message: in a new thread in the channel of the owner's message each run (default), or in that message's thread (in_this_thread: the router there remembers earlier runs). Owners only: pass message_id, the owner's message asking for it${role === 'worker' ? ' (your task quotes it)' : ''}. The hub posts nothing: once it succeeds, confirm it to the person yourself with reply (when it runs next, and that an owner can remove it with \`!cron rm <id>\`).`,
     inputSchema: obj({
       schedule: s('When: "every day 09:00", "every weekday 8:30", "every mon,thu 17:00", "every month on the 1st 09:00", "every 2h", "every 30m", or cron "0 9 * * 1-5". Runs at least 15 minutes apart.'),
       text: s('What each run is told: self-contained (it may start with no memory) — what to check or do, and what to post (max 4000 chars)'),
@@ -75,7 +75,7 @@ const common = (role: Role): Tool[] => [
   },
   {
     name: 'unschedule',
-    description: "Remove one of this workspace's scheduled jobs (list_schedules shows them) when a hub owner asks. Owners only: pass message_id, the owner's message asking for it. The hub confirms in the thread.",
+    description: "Remove one of this workspace's scheduled jobs (list_schedules shows them) when a hub owner asks. Owners only: pass message_id, the owner's message asking for it. The hub posts nothing: tell the person yourself with reply.",
     inputSchema: obj({ job_id: { type: 'number', description: 'Job number, e.g. 3' }, message_id: s("Id of the owner's message asking for it") }, ['job_id', 'message_id']),
   },
   {

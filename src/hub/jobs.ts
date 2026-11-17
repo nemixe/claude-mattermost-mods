@@ -8,6 +8,11 @@
  * the message goes through the router's inbox, which starts or resumes it
  * within the hub's session caps (a full pool means it waits its turn).
  *
+ * What people read comes from the sessions: the schedule and unschedule tools
+ * post nothing (the session confirms in its own words), and a run in an
+ * existing thread posts nothing before the router's reply. The one post of the
+ * hub's own is the first message of a run's new thread, which opens it.
+ *
  * Who: owners only. A session (the schedule tool) must cite an owner's message
  * in its thread asking for the job; `!cron` is an owner command; the CLI runs
  * as this machine's user.
@@ -239,8 +244,8 @@ async function start(hub: Hub, job: JobRow, runId: number, slot: number, when: s
   if (job.threadId) {
     const t = hub.store.thread(job.threadId)
     if (!t) return failed(`thread ${job.threadId} is gone`)
+    // No notice of the hub's own: the router's reply is the run's only post.
     thread = t
-    messageId = (await hub.notice(t, `⏰ **${job.name}** (scheduled job #${job.id}) is running.`))?.id
   } else {
     const ch = job.channelId!
     if (loadBindings(hub.p.bindings)[ch] !== w.name) return failed(`channel ${ch} is no longer bound to workspace ${w.name}`)
@@ -278,8 +283,9 @@ function rootText(job: JobRow): string {
 }
 
 function routerText(job: JobRow, when: string): string {
+  const posted = job.threadId ? ' The hub posts nothing for this run: your reply is all people see.' : ''
   return [
-    `[Scheduled job #${job.id} "${job.name}" (${job.schedule}, ${job.tz}; ${when}), set up by ${job.createdBy}. Not a person: the hub runs this on its schedule, and nobody may be watching. Do what it asks — answer yourself when reading is enough, delegate work that changes things — and post the outcome in this thread with reply. Keep it short, and say plainly when something needs a person.]`,
+    `[Scheduled job #${job.id} "${job.name}" (${job.schedule}, ${job.tz}; ${when}), set up by ${job.createdBy}. Not a person: the hub runs this on its schedule, and nobody may be watching. Do what it asks — answer yourself when reading is enough, delegate work that changes things — and post the outcome in this thread with reply. Keep it short, and say plainly when something needs a person.${posted}]`,
     '',
     job.text,
   ].join('\n')
@@ -361,18 +367,17 @@ export async function scheduleTool(hub: Hub, key: string, a: { schedule: string;
       ...(a.inThisThread ? { threadId: thread.id } : { channelId: thread.channelId }),
       createdBy: who, origin: `thread ${thread.id}`,
     })
-    await hub.notice(thread, `⏰ ${who} set up scheduled job #${job.id} **${job.name}**: ${summary(hub, job)}. Owners: \`!cron rm ${job.id}\` removes it, \`!cron pause ${job.id}\` pauses it.`)
-    return `scheduled job #${job.id} "${job.name}": ${summary(hub, job)}. The hub posted this in the thread, so don't repeat it. Each run reaches ${job.threadId ? "this thread's router" : 'a new router in a new thread'} as a kind="scheduled" message.`
+    // The session confirms it in its own words: the hub posts nothing here.
+    return `scheduled job #${job.id} "${job.name}" set up for ${who}: ${summary(hub, job)}. Each run reaches ${job.threadId ? "this thread's router" : 'a new router in a new thread'} as a kind="scheduled" message. Nothing was posted: confirm it to the person yourself with reply, in their language — when it runs next, where, and that an owner can remove it with \`!cron rm ${job.id}\` or pause it with \`!cron pause ${job.id}\`.`
   })
 }
 
 export async function unscheduleTool(hub: Hub, key: string, a: { jobId: number; messageId?: string }): Promise<string> {
   const ws = workspaceOf(hub, key)
-  const { thread, who } = await ownerAsked(hub, key, a.messageId)
+  const { who } = await ownerAsked(hub, key, a.messageId)
   return onChain(hub, async () => {
     const job = removeJob(hub, a.jobId, who, ws)
-    await hub.notice(thread, `🗑 ${who} removed scheduled job #${job.id} **${job.name}** (${job.schedule}).`)
-    return `removed job #${job.id} "${job.name}". The hub posted this in the thread, so don't repeat it.`
+    return `removed job #${job.id} "${job.name}" (${job.schedule}, ${job.tz}) for ${who}. Nothing was posted: tell the person yourself with reply.`
   })
 }
 
