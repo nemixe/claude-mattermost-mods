@@ -2,6 +2,7 @@
 
 import { expandHome } from '../shared/paths'
 import { DEFAULT_LAYA, type LayaConfig } from './laya'
+import { DEFAULT_OPENROUTER, type OpenRouterConfig } from './openrouter'
 import { readJson } from '../shared/util'
 
 export type IdleMinutes = { router: number; worker: number }
@@ -11,12 +12,23 @@ export type IdleMinutes = { router: number; worker: number }
  * - `mention` (default): an @mention starts a thread; every reply in the bot's threads reaches it.
  * - `mention-only`: only posts that @mention the bot reach it, replies in its threads too.
  * - `laya`: a mention starts or follows a thread; Laya judges the replies without one (laya.ts).
+ * - `openrouter`: the same, with a hosted model through OpenRouter as the judge (openrouter.ts).
  */
-export const TRIGGERS = ['mention', 'mention-only', 'laya'] as const
+export const TRIGGERS = ['mention', 'mention-only', 'laya', 'openrouter'] as const
 export type Trigger = (typeof TRIGGERS)[number]
 
 export function isTrigger(x: unknown): x is Trigger {
   return (TRIGGERS as readonly unknown[]).includes(x)
+}
+
+/** Triggers where the bot follows threads and a model judges the replies without a mention. */
+export function judged(t: Trigger | undefined): t is 'laya' | 'openrouter' {
+  return t === 'laya' || t === 'openrouter'
+}
+
+/** The judge's name, for people and sessions. */
+export function judgeName(t: Trigger | undefined): string {
+  return t === 'openrouter' ? 'the OpenRouter model' : 'Laya'
 }
 
 export type HubConfig = {
@@ -72,6 +84,8 @@ export type HubConfig = {
   trigger: Trigger
   /** Where Laya runs and how it decides (laya.ts DEFAULT_LAYA). */
   laya: LayaConfig
+  /** The OpenRouter judge for trigger "openrouter" (openrouter.ts DEFAULT_OPENROUTER); its key is OPENROUTER_API_KEY in .env. */
+  openrouter: OpenRouterConfig
 }
 
 export const DEFAULT_CONFIG: HubConfig = {
@@ -92,6 +106,7 @@ export const DEFAULT_CONFIG: HubConfig = {
   tmuxSocket: 'mmhub',
   trigger: 'mention',
   laya: DEFAULT_LAYA,
+  openrouter: DEFAULT_OPENROUTER,
 }
 
 export function loadConfig(file: string): HubConfig {
@@ -105,5 +120,6 @@ export function loadConfig(file: string): HubConfig {
     providers: Array.isArray(raw.providers) ? raw.providers.filter((n): n is string => typeof n === 'string') : undefined,
     trigger: isTrigger(raw.trigger) ? raw.trigger : 'mention',
     laya: { ...DEFAULT_LAYA, ...(raw.laya ?? {}) },
+    openrouter: { ...DEFAULT_OPENROUTER, ...(raw.openrouter ?? {}) },
   }
 }

@@ -7,6 +7,7 @@
 import { existsSync, mkdirSync, statSync, writeFileSync } from 'fs'
 import { isAbsolute, join } from 'path'
 import { assertSendable, chunk, errMsg, fmtAge, log, MAX_ATTACHMENT_BYTES, MAX_FILES_PER_POST, MAX_POST_CHARS, safeName } from '../shared/util'
+import { judged, judgeName } from './config'
 import type { Hub } from './hub'
 import { isLive } from './lifecycle'
 import { loadTrigger, MAX_RULES, RULE_MAX_CHARS, saveTrigger, triggerFile, usableRules } from './laya'
@@ -416,7 +417,7 @@ export async function handleCall(hub: Hub, key: string, tool: string, a: Args): 
       if (inDM(hub, t.id)) return 'Nothing to do: this thread is a DM, and every message in a DM reaches you.'
       const trig = w ? effective(hub.cfg, w).trigger : 'mention'
       if (trig === 'mention-only') return 'Nothing to do: in this workspace only messages that @mention you reach you (trigger mention-only).'
-      if (trig !== 'laya') return 'Nothing to do: this workspace takes every reply in your threads (Laya is off).'
+      if (!judged(trig)) return 'Nothing to do: this workspace takes every reply in your threads (no judge is on).'
       const open = hub.store.openTasksIn(t.id)
       if (open.length) {
         throw new ToolError(`work for this thread is still open (${open.map(x => `task #${x.id}, ${x.workerKey}: ${x.state}`).join('; ')}): unfollow once it is done and the person has the result`)
@@ -428,10 +429,10 @@ export async function handleCall(hub: Hub, key: string, tool: string, a: Args): 
       if (role !== 'worker') throw new ToolError('workers only')
       const w = hub.ws(hub.store.session(key)?.workspace ?? '')
       if (!w) throw new ToolError('workspace not found')
-      const on = effective(hub.cfg, w).trigger === 'laya'
-      const state = on
-        ? 'Laya is on for this workspace'
-        : `Laya is off for this workspace (trigger ${effective(hub.cfg, w).trigger}); the rules apply once an owner turns Laya on`
+      const trig = effective(hub.cfg, w).trigger
+      const state = judged(trig)
+        ? `${judgeName(trig)} judges replies for this workspace by these rules`
+        : `No judge is on for this workspace (trigger ${trig}); the rules apply once an owner sets the trigger to laya or openrouter`
       const content = str(a, 'content', false)
       if (content === undefined) {
         const t = loadTrigger(w.dir)
@@ -447,9 +448,9 @@ export async function handleCall(hub: Hub, key: string, tool: string, a: Args): 
       log('trigger', `${key} updated TRIGGER.md of ${w.name}: ${rules.answer.length} answer, ${rules.ignore.length} don't-answer rule(s)`)
       return [
         `saved: ${rules.answer.length} "answer" and ${rules.ignore.length} "don't answer" rule(s).`,
-        fit.dropped ? `Laya is asked about ${MAX_RULES} rules at most ("don't answer" first): ${fit.dropped} rule(s) are left out, so merge or drop some.` : '',
+        fit.dropped ? `The judge is asked about ${MAX_RULES} rules at most ("don't answer" first): ${fit.dropped} rule(s) are left out, so merge or drop some.` : '',
         fit.clipped ? `${fit.clipped} rule(s) are longer than ${RULE_MAX_CHARS} characters and get cut; shorten them.` : '',
-        `${state}${on ? '; it judges new messages with these rules from now on' : ''}.`,
+        `${state}${judged(trig) ? '; it judges new messages with these rules from now on' : ''}.`,
       ].filter(Boolean).join(' ')
     }
     default:

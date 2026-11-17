@@ -1,5 +1,6 @@
 /**
- * Laya in the hub, for workspaces whose trigger is "laya".
+ * The judge in the hub, for workspaces whose trigger is "laya" or "openrouter"
+ * (Laya, or a hosted model through OpenRouter: openrouter.ts).
  *
  * A hub thread is *followed* from the bot's first @mention in it, until its
  * router calls `unfollow` (the request is done) or an owner sends `!unfollow`.
@@ -11,14 +12,15 @@
  * without a mention are ignored. DMs never go to Laya: every DM reaches the bot.
  */
 
-import { errMsg, log } from '../shared/util'
+import { errMsg, log, readEnvFile } from '../shared/util'
 import type { Trigger } from './config'
 import type { Hub } from './hub'
 import type { InboundAction } from './inbound'
 import { judge, loadTrigger, MAX_PARTICIPANTS, mentionedNames, type ChatLine, type LayaCall, type LayaConfig, type Person } from './laya'
 import { serveKey, servePaths } from './layaserve'
 import type { MMPost } from './mattermost'
-import { loadBindings } from './workspaces'
+import { judgeOpenRouter, OPENROUTER_KEY, type OpenRouterCall } from './openrouter'
+import { effective, loadBindings } from './workspaces'
 
 type Classify = Extract<InboundAction, { kind: 'classify' }>
 
@@ -45,26 +47,33 @@ async function verdict(hub: Hub, a: Classify, post: MMPost): Promise<boolean> {
   const wsName = hub.store.thread(a.threadId)?.workspace ?? loadBindings(hub.p.bindings)[post.channel_id]
   const w = wsName ? hub.ws(wsName) : undefined
   if (!w) return true
-  const cfg = layaCall(hub)
+  const viaOpenRouter = effective(hub.cfg, w).trigger === 'openrouter'
+  const who = viaOpenRouter ? 'OpenRouter' : 'Laya'
   try {
-    const { earlier, people } = await thread(hub, post, cfg.messages)
-    const v = await judge(cfg, {
+    const { earlier, people } = await thread(hub, post, viaOpenRouter ? hub.cfg.openrouter.messages : hub.cfg.laya.messages)
+    const o = {
       bot: hub.bot.username,
       rules: loadTrigger(w.dir).rules,
       newest: await line(hub, post),
       earlier,
       people,
       mentioned: await mentioned(hub, post.message),
-    })
-    log('trigger', `${post.id} (${w.name}): ${v.p.toFixed(2)} by ${v.why} → ${v.yes ? 'to the router' : 'not for the bot'}`)
+    }
+    const v = viaOpenRouter ? await judgeOpenRouter(openRouterCall(hub), o) : await judge(layaCall(hub), o)
+    log('trigger', `${post.id} (${w.name}${viaOpenRouter ? `, ${hub.cfg.openrouter.model}` : ''}): ${v.p.toFixed(2)} by ${v.why} → ${v.yes ? 'to the router' : 'not for the bot'}`)
     return v.yes
   } catch (err) {
     if (Date.now() - lastWarnAt > 60_000) {
       lastWarnAt = Date.now()
-      log('trigger', `Laya failed (${errMsg(err)}): until it answers, replies in followed threads go to their router`)
+      log('trigger', `${who} failed (${errMsg(err)}): until it answers, replies in followed threads go to their router`)
     }
     return true
   }
+}
+
+/** The hub's OpenRouter settings, with the key from .env (read each time, so a new key needs no restart). */
+export function openRouterCall(hub: Pick<Hub, 'cfg' | 'p'>): OpenRouterCall {
+  return { ...hub.cfg.openrouter, apiKey: readEnvFile(hub.p.env)[OPENROUTER_KEY] || undefined }
 }
 
 /** The hub's Laya settings, with laya-serve's API key when the hub runs it. */

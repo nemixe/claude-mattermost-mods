@@ -240,6 +240,52 @@ like Ollama, but on CPU alone about 2 s, and 1 in 20 posts takes over the 5 s li
 English model alone; the multilingual model alone did worse (36 of 528 replies not
 for the bot let through, against 6).
 
+### A hosted judge: OpenRouter
+
+Instead of Laya, a hosted model can judge, through [OpenRouter](https://openrouter.ai).
+It needs no GPU and nothing installed, and it reads any language well, but each
+judged reply is an API call that costs a little and sends the thread out:
+
+```bash
+mmhub openrouter key
+```
+
+```bash
+mmhub ws trigger <workspace> openrouter
+```
+
+`mmhub openrouter key` reads the key from stdin (paste it at the prompt, so it stays out of
+your shell history), checks it with OpenRouter and saves it as `OPENROUTER_API_KEY` in
+the hub's `.env` (0600). The hub reads it on each call and never passes it to sessions.
+The default model is `google/gemini-decision-1`, Google's decision model: it doesn't write
+text, it answers typed questions with probabilities, through OpenRouter's Decisions API,
+at $0.10 per million input tokens with output free. OpenAI's counterpart is
+`openai/gpt-6-luna-decisions` (same price). `mmhub openrouter model <id>` picks another;
+any OpenRouter chat model works too (it answers in JSON instead). Which API a model
+needs comes from its OpenRouter listing (`openrouter.api` overrides it).
+`mmhub openrouter` says whether the key and model work, with one test judgement (a
+fraction of a cent), and `mmhub doctor` checks it too.
+
+Everything else is as with Laya: the bot follows threads from a mention until the router
+unfollows, the workspace's `TRIGGER.md` rules apply, and a thread of only the bot and one
+person needs no judge. The model gets the same view of the thread (who is in it, up to
+`openrouter.messages` (10) posts before the reply, the reply marked `>>`) and the rules. A
+decision model gets Laya's own questions and is decided as Laya is: the reply is for the
+bot when "talking to the bot" is at least `openrouter.threshold` (0.5) likely, a rule
+decides from `openrouter.ruleThreshold` (0.8), and a sure greeting or thanks from
+`openrouter.kindThreshold` (0.7). A chat model answers who the reply is talking to and
+whether a rule describes it; a "don't answer" rule wins, then an "answer" rule, then
+whether it talks to the bot. If OpenRouter fails or times out (`openrouter.timeoutMs`,
+10 s), the reply reaches the router.
+
+**What leaves the machine:** for each reply without a mention in a followed thread, its
+text, up to 10 posts before it, the usernames in the thread and the workspace's rules go
+to OpenRouter and the model's provider. By default only to providers that neither store
+nor train on prompts (`openrouter.dataCollection: "deny"`; `"allow"` lifts it). Settings
+live under `"openrouter"` in `config.json`: `model`, `api`, `url`, `timeoutMs`,
+`messages`, `dataCollection`, the three thresholds, and `reasoningEffort` for chat models
+that think.
+
 ## Other workspaces and DMs
 
 A router or worker can ask another workspace, through that workspace's router:

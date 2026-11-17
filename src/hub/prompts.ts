@@ -7,7 +7,7 @@
 import { readFileSync } from 'fs'
 import { join } from 'path'
 import type { WorkerRow } from './store'
-import type { Trigger } from './config'
+import { judged, type Trigger } from './config'
 import type { Workspace } from './workspaces'
 
 /** A workspace's own router persona: <workspace>/ROUTER.md (copied from the template like any file). */
@@ -130,11 +130,13 @@ function triggerNote(w: Workspace, role: 'router' | 'worker', trigger: Trigger):
       ? `\n\nHow messages reach you (the current setting): in this workspace only messages that @mention you reach you, replies in your own threads too. DMs, answers to permission prompts and ! commands are the exceptions. So when you ask a person something, ask them to @mention you in their answer, or it won't reach you. A message may say that earlier ones in the thread didn't mention you: fetch_thread shows them when you need them.`
       : `\n\nWhen the bot answers (the current setting): in this workspace only messages that @mention the bot reach it, replies in its threads too. When you need an answer from a person, your question should ask them to @mention the bot in their reply.`
   }
-  if (trigger !== 'laya') return ''
+  if (!judged(trigger)) return ''
   const file = join(w.dir, 'TRIGGER.md')
+  const judge = trigger === 'openrouter' ? 'an AI model (through OpenRouter)' : 'Laya'
+  const Judge = trigger === 'openrouter' ? 'The model' : 'Laya'
   return role === 'router'
-    ? `\n\nHow messages reach you (the current setting): this workspace uses Laya. You follow your thread from the first @mention. While you follow it, a message without an @mention reaches you only when Laya judges it meant for you, by the rules in ${file}. When the thread's request is done (you posted the result, and nothing waits on the person or a worker), call unfollow: from then on only @mentions reach you, and a mention follows the thread again. Don't unfollow while you wait for an answer. If a person says you answered something that wasn't for you, or missed something that was, delegate a worker to adjust the rules with trigger_rules (one short rule), and carry on. A message may say that earlier ones were judged not for you: fetch_thread shows them when you need them.`
-    : `\n\nWhen the bot answers (the current setting): this workspace uses Laya, which judges each message without an @mention by the rules in ${file}. When you learn when the bot should or shouldn't answer (a person says so, or a task asks for it), update them with trigger_rules: read them first (no content), then save the whole file with your change. Short, specific rules, one per line (each is checked on its own, so vague ones do nothing); keep the others.`
+    ? `\n\nHow messages reach you (the current setting): this workspace uses ${judge}. You follow your thread from the first @mention. While you follow it, a message without an @mention reaches you only when ${Judge} judges it meant for you, by the rules in ${file}. When the thread's request is done (you posted the result, and nothing waits on the person or a worker), call unfollow: from then on only @mentions reach you, and a mention follows the thread again. Don't unfollow while you wait for an answer. If a person says you answered something that wasn't for you, or missed something that was, delegate a worker to adjust the rules with trigger_rules (one short rule), and carry on. A message may say that earlier ones were judged not for you: fetch_thread shows them when you need them.`
+    : `\n\nWhen the bot answers (the current setting): this workspace uses ${judge}, which judges each message without an @mention by the rules in ${file}. When you learn when the bot should or shouldn't answer (a person says so, or a task asks for it), update them with trigger_rules: read them first (no content), then save the whole file with your change. Short, specific rules, one per line (each is checked on its own, so vague ones do nothing); keep the others.`
 }
 
 export function routerContext(w: Workspace, o: { threadId: string; permalink: string; workers: WorkerRow[]; persona: string; reports: WorkerReports; trigger?: Trigger }): string {

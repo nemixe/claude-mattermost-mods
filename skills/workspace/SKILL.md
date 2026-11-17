@@ -1,6 +1,6 @@
 ---
 name: workspace
-description: Manage Mattermost hub workspaces — create one, bind channels to it, add or remove repos, edit its CLAUDE.md and knowledge, set per-workspace models, idle timeouts and Claude Code providers (its own login or key, with fallback), choose which other workspaces may send it requests, let the Laya model decide when the bot answers without an @mention (TRIGGER.md rules) or have it answer only when @mentioned (mention-only), set up scheduled jobs (recurring instructions to its router, "cron"), see its sessions. Use when the user asks to create a workspace, connect a channel or repo, give a workspace its own Claude login or API key, set its fallback providers, limit which workspaces can ask it, make the bot answer without being mentioned, make it answer only when mentioned (stop replying to every message in its threads), edit its trigger rules, schedule recurring work or a cron job for the bot, or change how a workspace's sessions run.
+description: Manage Mattermost hub workspaces — create one, bind channels to it, add or remove repos, edit its CLAUDE.md and knowledge, set per-workspace models, idle timeouts and Claude Code providers (its own login or key, with fallback), choose which other workspaces may send it requests, let the Laya model decide when the bot answers without an @mention (TRIGGER.md rules) or a hosted model through OpenRouter (trigger openrouter), or have it answer only when @mentioned (mention-only), set up scheduled jobs (recurring instructions to its router, "cron"), see its sessions. Use when the user asks to create a workspace, connect a channel or repo, give a workspace its own Claude login or API key, set its fallback providers, limit which workspaces can ask it, make the bot answer without being mentioned, make it answer only when mentioned (stop replying to every message in its threads), use an OpenRouter model to decide when it answers, edit its trigger rules, schedule recurring work or a cron job for the bot, or change how a workspace's sessions run.
 user-invocable: true
 allowed-tools:
   - Read
@@ -58,7 +58,18 @@ Arguments passed: `$ARGUMENTS`
 - **`set <workspace> <key> <value>`**: edit `workspace.json` — `routerModel`, `workerModel`,
   `workerPermissionMode`, `idleMinutes.router`, `idleMinutes.worker`, `baseRef`, `description`,
   `acceptFrom`, `trigger`. Read, change, write (2-space JSON). New and resumed sessions pick it up.
-- **`trigger <workspace> [mention|mention-only|laya|inherit]`**: which replies in the bot's threads
+- **`trigger <workspace> openrouter`**: like `laya` below (follow, unfollow, `TRIGGER.md`,
+  the two-person rule), but a hosted model judges, through OpenRouter: no GPU, any
+  language, a small cost per judged reply. Before turning it on, tell the user plainly
+  that each reply without a mention in a followed thread sends its text, up to 10 earlier
+  posts, the thread's usernames and the rules to OpenRouter (by default only to providers
+  that keep no prompts). It needs a key: the user runs `mmhub openrouter key` **in their
+  own terminal** and pastes it there; never ask for the key in chat or put it in a
+  command line. `mmhub openrouter model <id>` picks the model (default
+  `google/gemini-decision-1`, Google's decision model; `openai/gpt-6-luna-decisions` is
+  OpenAI's; any OpenRouter chat model works too), and `mmhub openrouter` says whether
+  key and model work, with one test judgement.
+- **`trigger <workspace> [mention|mention-only|laya|openrouter|inherit]`**: which replies in the bot's threads
   reach it. `mention` (default): an @mention starts a thread, and every reply in it
   reaches the router, mentioned or not. `mention-only`: only posts that @mention the bot
   reach it, replies in its own threads too; the router is told how many it didn't get

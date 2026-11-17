@@ -5,7 +5,7 @@
 
 import { PERMISSION_REPLY_RE } from '../shared/util'
 import { classifySender, isOwner, requiresMention, type Access, type SenderRole } from './access'
-import type { Trigger } from './config'
+import { judged, type Trigger } from './config'
 import { isBotPost } from './mattermost'
 
 export type InboundPost = { id: string; root_id: string; user_id: string; channel_id: string; message: string; type?: string; props?: Record<string, unknown> }
@@ -118,7 +118,7 @@ export function decideInbound(i: InboundInput): InboundAction {
   if (i.knownThread) {
     const message = { kind: 'message' as const, threadId, text: raw, role }
     // A DM always reaches the bot: no mention needed, no Laya, no follow state.
-    if (i.trigger !== 'laya' || isDM) return message
+    if (!judged(i.trigger) || isDM) return message
     // Laya: a mention follows the thread; while it is followed, Laya judges the rest.
     if (mentioned) return { ...message, follow: true }
     if (i.followed === false) return { kind: 'ignore', reason: 'thread not followed (a mention follows it again)' }

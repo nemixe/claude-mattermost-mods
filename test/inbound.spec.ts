@@ -202,6 +202,11 @@ describe('trigger mention-only', () => {
     expect(decideInbound(input({ ...only, root: 'P0', knownThread: true, message: 'yes abcde' })).kind).toBe('permission')
     expect(decideInbound(input({ ...only, root: 'P0', knownThread: true, message: '!ws' })).kind).toBe('command')
   })
+  test('trigger openrouter judges replies like laya: in followed threads only', () => {
+    expect(decideInbound(input({ trigger: 'openrouter', root: 'P0', knownThread: true, message: 'lunch?' })).kind).toBe('classify')
+    expect(decideInbound(input({ trigger: 'openrouter', root: 'P0', knownThread: true, followed: false, message: 'lunch?' })).kind).toBe('ignore')
+    expect(decideInbound(input({ trigger: 'openrouter', root: 'P0', knownThread: true, message: '@claude lunch?' }))).toMatchObject({ kind: 'message', follow: true })
+  })
   test('trigger mention (the default) still takes every reply in its threads', () => {
     expect(decideInbound(input({ trigger: 'mention', root: 'P0', knownThread: true, message: 'lunch?' })).kind).toBe('message')
   })

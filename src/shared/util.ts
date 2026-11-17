@@ -78,6 +78,21 @@ export function writeJsonAtomic(path: string, data: unknown, mode = 0o600): void
   renameSync(tmp, path)
 }
 
+/** Set KEY=VALUE in an env file (0600, written atomically), replacing the key's line; other lines are kept. */
+export function setEnvVar(path: string, key: string, value: string): void {
+  if (!/^\w+$/.test(key) || /[\r\n]/.test(value)) throw new Error(`bad env entry ${key}`)
+  let lines: string[] = []
+  try {
+    lines = readFileSync(path, 'utf8').split('\n')
+  } catch {}
+  const kept = lines.filter(l => !new RegExp(`^\\s*${key}\\s*=`).test(l))
+  while (kept.length && kept.at(-1)!.trim() === '') kept.pop()
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
+  const tmp = `${path}.${process.pid}.tmp`
+  writeFileSync(tmp, [...kept, `${key}=${value}`].join('\n') + '\n', { mode: 0o600 })
+  renameSync(tmp, path)
+}
+
 /** Load KEY=VALUE lines into process.env (real env wins). Locks the file to 0600. */
 export function loadEnvFile(path: string): void {
   try {

@@ -96,7 +96,7 @@ export function toolsFor(role: Role, reports: Reports = 'router'): Tool[] {
       ...common(role),
       {
         name: 'unfollow',
-        description: 'The request in your thread is done (the result is posted; nothing waits on the person or a worker): stop following the thread. Where Laya decides (trigger "laya"), messages without an @mention then stop reaching you; a mention follows the thread again. Refused while a worker still has work for the thread.',
+        description: 'The request in your thread is done (the result is posted; nothing waits on the person or a worker): stop following the thread. Where a judge decides (trigger "laya" or "openrouter"), messages without an @mention then stop reaching you; a mention follows the thread again. Refused while a worker still has work for the thread.',
         inputSchema: obj({}),
       },
       {
@@ -139,7 +139,7 @@ export function toolsFor(role: Role, reports: Reports = 'router'): Tool[] {
     },
     {
       name: 'trigger_rules',
-      description: "This workspace's TRIGGER.md: the rules Laya uses to decide whether the bot answers a message that doesn't @mention it. Without content: show them. With content: replace the whole file (keep its \"## Answer\" and \"## Don't answer\" lists, one short rule per line).",
+      description: "This workspace's TRIGGER.md: the rules the judge (Laya, or the OpenRouter model) uses to decide whether the bot answers a message that doesn't @mention it. Without content: show them. With content: replace the whole file (keep its \"## Answer\" and \"## Don't answer\" lists, one short rule per line).",
       inputSchema: obj({ content: s('The whole new TRIGGER.md; omit to read the current rules') }),
     },
     {

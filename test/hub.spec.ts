@@ -693,6 +693,69 @@ describe('trigger mention-only', () => {
   }, T)
 })
 
+describe('trigger openrouter', () => {
+  test('a hosted decision model judges replies in followed threads, with the key from .env; when it fails, replies get through', async () => {
+    let toBot = 0.1
+    let down = false
+    const listings: string[] = []
+    const seen: { url: string; auth: string | null; body: { model: string; provider: unknown; state: string; questions: Record<string, unknown> } }[] = []
+    const or = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        const url = new URL(req.url).pathname
+        if (url.includes('/models/')) {
+          listings.push(url)
+          return Response.json({ data: { architecture: { output_modalities: ['decisions'] }, endpoints: [{}] } })
+        }
+        if (down) return Response.json({ error: { message: 'boom' } }, { status: 500 })
+        seen.push({ url, auth: req.headers.get('authorization'), body: (await req.json()) as (typeof seen)[number]['body'] })
+        return Response.json({ answers: { who: { type: 'choice', probabilities: { hubbot: toBot, bob: 0, nobody: 1 - toBot } } } })
+      },
+    })
+    try {
+      const { hub, tmux, w, p, others } = setup({ openrouter: { url: `http://127.0.0.1:${or.port}/api/v1`, timeoutMs: 2000 } }, dir => {
+        writeFileSync(join(dir, 'access.json'), JSON.stringify({ dmPolicy: 'allowlist', allowFrom: ['U1'], channels: {}, pending: {} }))
+        writeFileSync(join(dir, '.env'), 'MATTERMOST_URL=http://mm\nOPENROUTER_API_KEY=sk-or-v1-test\n')
+      })
+      hub.bot = { id: 'BOT', username: 'hubbot' }
+      setWorkspaceTrigger(loadConfig(p.config), 'demo', 'openrouter')
+      bindChannel(p.bindings, 'C1', 'demo')
+      const rkey = hub.createRouter({ threadId: 'T3', channelId: 'C1', workspace: w, label: 'thread three' })
+      // Someone else has posted, so it isn't a two-person thread.
+      others.push({ id: 'B1', root_id: 'T3', user_id: 'U2', channel_id: 'C1', message: 'I can look at it later', create_at: 0 } as MMPost)
+      const post = (id: string, message: string) => ({ id, root_id: 'T3', user_id: 'U1', channel_id: 'C1', message, create_at: Date.now() }) as MMPost
+      const send = (id: string, message: string) => hub.enqueue(() => hub.onPosted(post(id, message), 'O'))
+
+      await send('M1', 'lunch at noon?')
+      await until('the model judged M1', () => hub.store.get('skipped:T3') === '1')
+      expect(tmux.launches.length).toBe(0)
+      expect(listings).toEqual(['/api/v1/models/google/gemini-decision-1/endpoints'])
+      expect(seen[0]!.url).toBe('/api/alpha/decisions')
+      expect(seen[0]!.auth).toBe('Bearer sk-or-v1-test')
+      expect(seen[0]!.body.model).toBe('google/gemini-decision-1')
+      expect(seen[0]!.body.provider).toEqual({ data_collection: 'deny' })
+      expect(seen[0]!.body.state).toContain('>> @alice: lunch at noon?')
+      expect(Object.keys(seen[0]!.body.questions)).toContain('who')
+
+      toBot = 0.9
+      await send('M2', 'is the build green?')
+      const rb = await connect(hub, tmux, rkey, 1)
+      await until('M2 reaches the router', () => rb.got.length === 1)
+      expect(rb.got[0]!.content).toContain('1 earlier message(s) in this thread were judged not meant for you')
+      expect(hub.hookContext(rkey)).toContain('this workspace uses an AI model (through OpenRouter)')
+      // The model's API was looked up once.
+      expect(listings.length).toBe(1)
+
+      // OpenRouter down: the reply reaches the router rather than being lost.
+      down = true
+      await send('M3', 'and the tests?')
+      await until('M3 reaches the router', () => rb.got.length === 2)
+    } finally {
+      or.stop(true)
+    }
+  }, T)
+})
+
 describe('Laya decides what reaches the bot', () => {
   test('in threads the bot follows (from a mention until the router unfollows), by its judgement; workers keep the rules', async () => {
     let answer = 0.2
@@ -800,7 +863,7 @@ describe('Laya decides what reaches the bot', () => {
       expect(await handleCall(hub, key, 'trigger_rules', {})).toContain('- questions about the build')
       const saved = await handleCall(hub, key, 'trigger_rules', { content: "## Answer\n- questions about the build\n- deploy requests\n## Don't answer\n- lunch plans\n" })
       expect(saved).toContain('saved: 2 "answer" and 1 "don\'t answer" rule(s).')
-      expect(saved).toContain('Laya is on for this workspace')
+      expect(saved).toContain('Laya judges replies for this workspace')
       expect(readFileSync(join(w.dir, 'TRIGGER.md'), 'utf8')).toContain('- deploy requests')
       await expect(handleCall(hub, key, 'trigger_rules', { content: 'no rules here' })).rejects.toThrow('no rules found')
       await expect(handleCall(hub, rkey, 'trigger_rules', {})).rejects.toThrow('workers only')

@@ -13,9 +13,10 @@
  *                                   after the current turn ends (default), or right away (--now)
  *   mmhub ws list | create <name> [description] | bind <ws> <channel-id> | unbind <channel-id> | show <name>
  *   mmhub ws template               path of <workspacesDir>/workspace-template (created if missing)
- *   mmhub ws trigger <ws> [mention|mention-only|laya|inherit]
- *                                   which replies in the bot's threads reach it: all (mention), or in
- *                                   threads it follows, those Laya judges meant for it (TRIGGER.md rules)
+ *   mmhub ws trigger <ws> [mention|mention-only|laya|openrouter|inherit]
+ *                                   which replies in the bot's threads reach it: all (mention), only those that
+ *                                   @mention it (mention-only), or in threads it follows, those a judge (Laya, or a
+ *                                   model through OpenRouter) finds meant for it (TRIGGER.md rules)
  *   mmhub repo add <ws> <path|git-url> [--name <n>] | rm <ws> <name>
  *   mmhub lookup user <username> | lookup channel <team> <channel>   Mattermost ids
  *   mmhub agent install|uninstall   (macOS) start the hub at login via launchd
@@ -25,6 +26,8 @@
  *                                   then keeps it running while a workspace uses Laya (the models are
  *                                   freed after 5 idle minutes, or MIN; 0 keeps them loaded)
  *   mmhub laya status | restart | logs [-n N] | use ollama|serve | uninstall
+ *   mmhub openrouter [status] | key | model <id>
+ *                                   the OpenRouter judge: key (read from stdin into .env), model (any OpenRouter id)
  *   mmhub reload                    re-read config.json (sessions move if their provider changed)
  *
  * Scheduled jobs (at set times the hub hands an instruction to a router of the workspace):
@@ -67,9 +70,10 @@ import { MIN_GAP_MINUTES } from './hub/jobs'
 import { cleanEnv, Tmux } from './hub/tmux'
 import { paths, ROOT } from './shared/paths'
 import { SESSION_KEY_RE, type HubSnapshot, type SessionSnapshot } from './shared/snapshot'
-import { errMsg, fmtAge, isPidAlive, readEnvFile, readJson, writeJsonAtomic } from './shared/util'
+import { errMsg, fmtAge, isPidAlive, readEnvFile, readJson, setEnvVar, writeJsonAtomic } from './shared/util'
 import { Database } from 'bun:sqlite'
-import { isTrigger, loadConfig } from './hub/config'
+import { isTrigger, judged, loadConfig } from './hub/config'
+import { apiOf, modelReady, OPENROUTER_KEY, openRouterReady, type OpenRouterCall, type OpenRouterConfig } from './hub/openrouter'
 import { routerPersona } from './hub/prompts'
 import {
   buildLaunch, chooseProvider, configDirOf, cooling, DEFAULT_PROVIDER, deleteSecret, ensureConfigDir, HUB_LIST, isKind, KINDS, loadProviders,
@@ -347,6 +351,11 @@ async function doctor(): Promise<never> {
     const fix = cfg.laya.serve && why ? (installed(servePaths(p)) ? ' (mmhub laya status; mmhub laya logs)' : ' (not installed: mmhub laya install)') : ''
     check(!why, `Laya (${where}) for ${byLaya.join(', ')}: ${why ?? 'ready'}${fix}`)
   }
+  const byOpenRouter = listWorkspaces(cfg).filter(w => effective(cfg, w).trigger === 'openrouter').map(w => w.name)
+  if (byOpenRouter.length) {
+    const why = await openRouterReady(openRouterOf(cfg))
+    check(!why, `OpenRouter (${cfg.openrouter.model}) for ${byOpenRouter.join(', ')}: ${why ?? 'ready'}`)
+  }
   const up = await hubRunning()
   check(true, `hub ${up ? `running (pid ${lockPid() ?? '?'})` : 'not running — mmhub start'}`)
   for (const [ok, msg] of rows) console.log(`${ok ? '✓' : '✗'} ${msg}`)
@@ -397,27 +406,33 @@ async function ws(): Promise<never> {
       const where = channelsOf(loadBindings(p.bindings), w.name)
       console.log(`takes requests from: ${askers}${where.length ? '' : ' (no channel bound, so none can reach it)'}`)
       const trig = loadTrigger(w.dir)
-      console.log(`trigger${w.trigger ? '' : ' (config.json)'}: ${effective(cfg, w).trigger}${effective(cfg, w).trigger === 'laya' ? ` — rules: ${trig.own ? triggerFile(w.dir) : 'built-in (no TRIGGER.md)'}` : ''}`)
+      const tr = effective(cfg, w).trigger
+      console.log(`trigger${w.trigger ? '' : ' (config.json)'}: ${tr}${tr === 'openrouter' ? ` (${cfg.openrouter.model})` : ''}${judged(tr) ? ` — rules: ${trig.own ? triggerFile(w.dir) : 'built-in (no TRIGGER.md)'}` : ''}`)
       const persona = routerPersona(cfg, w)
       console.log(`\nrouter persona (${persona.source}):\n${persona.text}`)
       process.exit(0)
     }
     case 'trigger': {
       const w = a1 ? loadWorkspace(cfg, a1) : undefined
-      if (!w) out(false, a1 ? `no workspace ${a1}` : 'usage: mmhub ws trigger <workspace> [mention|mention-only|laya|inherit]')
+      const usage = 'usage: mmhub ws trigger <workspace> [mention|mention-only|laya|openrouter|inherit]'
+      if (!w) out(false, a1 ? `no workspace ${a1}` : usage)
       const [want] = rest
       if (want === undefined) {
         const t = effective(cfg, w).trigger
-        out(true, `workspace ${w.name}: ${t}${w.trigger ? '' : ' (from config.json)'}${t === 'laya' ? `; rules ${loadTrigger(w.dir).own ? triggerFile(w.dir) : 'built-in'}` : ''}`)
+        out(true, `workspace ${w.name}: ${t}${t === 'openrouter' ? ` (${cfg.openrouter.model})` : ''}${w.trigger ? '' : ' (from config.json)'}${judged(t) ? `; rules ${loadTrigger(w.dir).own ? triggerFile(w.dir) : 'built-in'}` : ''}`)
       }
-      if (want !== 'inherit' && !isTrigger(want)) out(false, 'usage: mmhub ws trigger <workspace> [mention|mention-only|laya|inherit]')
+      if (want !== 'inherit' && !isTrigger(want)) out(false, usage)
       const after = effective(cfg, setWorkspaceTrigger(cfg, w.name, want === 'inherit' ? undefined : want)).trigger
       if (after === 'mention-only') out(true, `workspace ${w.name}: only posts that @mention the bot reach it, replies in its threads too (DMs, 🔐 answers and ! commands need none)`)
-      if (after !== 'laya') out(true, `workspace ${w.name}: posts need an @mention to start a thread; every reply in the bot's threads reaches it`)
+      if (!judged(after)) out(true, `workspace ${w.name}: posts need an @mention to start a thread; every reply in the bot's threads reaches it`)
       let made = ''
       if (!existsSync(triggerFile(w.dir))) {
         writeFileSync(triggerFile(w.dir), DEFAULT_TRIGGER_MD, { mode: 0o644 })
         made = `; wrote the starter rules to ${triggerFile(w.dir)}`
+      }
+      if (after === 'openrouter') {
+        const why = await openRouterReady(openRouterOf(cfg))
+        out(true, `workspace ${w.name}: the bot follows threads it is @mentioned in, and ${cfg.openrouter.model} (through OpenRouter) decides which replies without a mention reach it until the router unfollows${made}. Each such reply sends the thread's last ${cfg.openrouter.messages} posts and the names in it to OpenRouter${cfg.openrouter.dataCollection === 'deny' ? ' (only to providers that keep no prompts)' : ''}${why ? `. ⚠️ not working yet: ${why} (until it is, every reply in a followed thread reaches the router)` : ''}`)
       }
       const why = await layaReady(layaOf(cfg.laya))
       out(true, `workspace ${w.name}: the bot follows threads it is @mentioned in, and Laya decides which replies without a mention reach it until the router unfollows${made}${why ? `. ⚠️ not working yet: ${why} (until it is, every reply in a followed thread reaches the router)` : ''}`)
@@ -569,6 +584,55 @@ function parseAddFlags(rest: string[]): { def: Partial<ProviderDef>; errors: str
 /** The hub's Laya settings, with laya-serve's API key when the hub runs it. */
 function layaOf(c: LayaConfig): LayaConfig & LayaCall {
   return c.serve ? { ...c, apiKey: serveKey(servePaths(p)) } : c
+}
+
+/** The hub's OpenRouter settings, with the key from .env. */
+function openRouterOf(c: { openrouter: OpenRouterConfig }): OpenRouterCall {
+  return { ...c.openrouter, apiKey: readEnvFile(p.env)[OPENROUTER_KEY] || undefined }
+}
+
+/** One line from stdin (the key is typed or pasted there, so it stays out of shell history and argv). */
+async function readLine(prompt: string): Promise<string> {
+  if (process.stdin.isTTY) process.stderr.write(prompt)
+  for await (const line of console) return line.trim()
+  return ''
+}
+
+/** `mmhub openrouter …`: the key and model of the OpenRouter judge (trigger "openrouter"). */
+async function openrouter(): Promise<never> {
+  const cfg = loadConfig(p.config)
+  const [, op, value] = args
+  const users = () => listWorkspaces(cfg).filter(w => effective(cfg, w).trigger === 'openrouter').map(w => w.name)
+  switch (op) {
+    case undefined:
+    case 'status': {
+      const c = openRouterOf(cfg)
+      const why = await openRouterReady(c)
+      const ws = users()
+      out(!why, `OpenRouter judge: model ${c.model} (${await apiOf(c)} API), key ${c.apiKey ? 'set' : 'missing'}, data collection ${c.dataCollection}; ${why ?? 'ready'}. Workspaces using it: ${ws.length ? ws.join(', ') : 'none (mmhub ws trigger <ws> openrouter)'}`)
+    }
+    case 'key': {
+      const key = value === '-' || value === undefined ? await readLine('OpenRouter API key (sk-or-…): ') : out(false, 'pass the key on stdin, not as an argument: mmhub openrouter key')
+      if (!/^sk-or-[\w-]{10,}$/.test(key)) out(false, 'that does not look like an OpenRouter key (sk-or-…); nothing saved')
+      const why = await openRouterReady({ ...cfg.openrouter, apiKey: key })
+      if (why && /refused the key/.test(why)) out(false, `${why}; nothing saved`)
+      setEnvVar(p.env, OPENROUTER_KEY, key)
+      out(true, `saved ${OPENROUTER_KEY} to ${p.env} (0600). The hub reads it on the next judged reply; no restart needed${why ? `. ⚠️ ${why}` : ''}`)
+    }
+    case 'model': {
+      if (!value) out(false, `usage: mmhub openrouter model <id>   (now ${cfg.openrouter.model}; decision models: google/gemini-decision-1, openai/gpt-6-luna-decisions; or a chat model, e.g. google/gemini-2.5-flash-lite)`)
+      const bad = await modelReady({ ...cfg.openrouter, model: value })
+      if (bad && /no model|no provider/.test(bad)) out(false, `${bad}; nothing changed`)
+      const why = bad ?? (await openRouterReady({ ...openRouterOf(cfg), model: value }))
+      const raw = readJson<Record<string, unknown>>(p.config, () => ({}))
+      raw.openrouter = { ...((raw.openrouter as object | undefined) ?? {}), model: value }
+      writeJsonAtomic(p.config, raw)
+      const live = await hubRunning() ? await controlOp('reload').then(r => r.ok, () => false) : false
+      out(true, `OpenRouter model: ${value}${live ? ' (the hub reloaded config.json)' : '. Run mmhub reload if the hub is running'}${why ? `. ⚠️ ${why}` : ''}`)
+    }
+    default:
+      out(false, 'usage: mmhub openrouter [status] | key | model <id>')
+  }
 }
 
 /** Loads the checkpoints the way laya-serve does (downloading them into HF_HOME), on CPU. */
@@ -1070,6 +1134,7 @@ async function main(): Promise<never> {
     case 'lookup': return lookup()
     case 'agent': return agent()
     case 'laya': return laya()
+    case 'openrouter': return openrouter()
     case 'start': return start()
     case 'stop': return stop()
     case 'status': return status()

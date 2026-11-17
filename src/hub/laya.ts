@@ -107,8 +107,9 @@ export const TRIGGER_MAX_CHARS = 6000
 
 export const DEFAULT_TRIGGER_MD = `# When to answer without an @mention
 
-Laya reads each message that doesn't @mention the bot and the messages before it,
-and judges on its own whether the message is meant for the bot. These rules
+The judge (Laya, or a model through OpenRouter) reads each message that doesn't
+@mention the bot and the messages before it, and judges on its own whether the
+message is meant for the bot. These rules
 correct it: each is checked on its own, and decides when it clearly describes the
 message ("Don't answer" wins). One short, specific rule per line (at most
 ${RULE_MAX_CHARS} characters, ${MAX_RULES} rules in all). Vague rules do nothing.
@@ -266,7 +267,7 @@ function optionKeys(ps: Person[]): string[] {
 }
 
 /** Accounts the post @mentions besides the bot: one "is it talking to them?" question each. */
-function addressees(bot: string, mentioned: Person[] = []): Person[] {
+export function addressees(bot: string, mentioned: Person[] = []): Person[] {
   const out: Person[] = []
   for (const m of mentioned) if (m.user !== bot && !out.some(x => x.user === m.user)) out.push(m)
   return out.slice(0, MAX_PARTICIPANTS - 1)
@@ -331,7 +332,7 @@ export function buildRequest(o: { bot: string; rules: TriggerRules; newest: Chat
   return { model: o.model, state: buildState(o.bot, o.newest, o.earlier, o.people), questions, keep_alive: '30m' }
 }
 
-type Answers = Record<string, { probabilities?: Record<string, number> } | undefined>
+export type Answers = Record<string, { probabilities?: Record<string, number> } | undefined>
 
 export type Verdict = { yes: boolean; p: number; why: string }
 
