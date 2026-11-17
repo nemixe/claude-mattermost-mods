@@ -14,7 +14,8 @@
 import { errMsg, log } from '../shared/util'
 import type { Hub } from './hub'
 import type { InboundAction } from './inbound'
-import { judge, loadTrigger, MAX_PARTICIPANTS, mentionedNames, type ChatLine, type Person } from './laya'
+import { judge, loadTrigger, MAX_PARTICIPANTS, mentionedNames, type ChatLine, type LayaCall, type LayaConfig, type Person } from './laya'
+import { serveKey, servePaths } from './layaserve'
 import type { MMPost } from './mattermost'
 import { loadBindings } from './workspaces'
 
@@ -43,7 +44,7 @@ async function verdict(hub: Hub, a: Classify, post: MMPost): Promise<boolean> {
   const wsName = hub.store.thread(a.threadId)?.workspace ?? loadBindings(hub.p.bindings)[post.channel_id]
   const w = wsName ? hub.ws(wsName) : undefined
   if (!w) return true
-  const cfg = hub.cfg.laya
+  const cfg = layaCall(hub)
   try {
     const { earlier, people } = await thread(hub, post, cfg.messages)
     const v = await judge(cfg, {
@@ -63,6 +64,12 @@ async function verdict(hub: Hub, a: Classify, post: MMPost): Promise<boolean> {
     }
     return true
   }
+}
+
+/** The hub's Laya settings, with laya-serve's API key when the hub runs it. */
+export function layaCall(hub: Pick<Hub, 'cfg' | 'p'>): LayaConfig & LayaCall {
+  const cfg = hub.cfg.laya
+  return cfg.serve ? { ...cfg, apiKey: serveKey(servePaths(hub.p)) } : cfg
 }
 
 /** Not for the bot: the router learns how many it missed when the next message reaches it. */

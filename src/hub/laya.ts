@@ -71,6 +71,24 @@ export type LayaConfig = {
   timeoutMs: number
   /** Earlier posts Laya reads along with the newest one. */
   messages: number
+  /** Set by `mmhub laya install`: the hub runs Laya's own server (layaserve.ts) instead of using Ollama. */
+  serve?: ServeConfig
+}
+
+/** laya-serve as the hub runs it: its port, the checkpoints it loads, and a torch device (default: the best there is). */
+export type ServeConfig = {
+  port: number
+  models: string[]
+  device?: string
+  /** Free the models after this many idle minutes (layaserve.ts DEFAULT_UNLOAD_MINUTES); 0 keeps them loaded. */
+  unloadAfterMinutes?: number
+}
+
+/** A call to Laya: the config, and laya-serve's API key when the hub runs it (never stored in config.json). */
+export type LayaCall = { apiKey?: string }
+
+function authHeaders(c: LayaCall): Record<string, string> {
+  return c.apiKey ? { Authorization: `Bearer ${c.apiKey}` } : {}
 }
 
 export const DEFAULT_LAYA: LayaConfig = { url: 'http://127.0.0.1:11434', model: 'laya', threshold: 0.45, ruleThreshold: 0.85, kindThreshold: 0.7, timeoutMs: 5000, messages: 10 }
@@ -359,10 +377,10 @@ export function decide(answers: Answers, rules: TriggerRules, cfg: Pick<LayaConf
 }
 
 /** POST /v1/systemone; Laya's answers. Throws on any failure. */
-export async function askLaya(cfg: Pick<LayaConfig, 'url' | 'timeoutMs'>, body: Record<string, unknown>, fetchFn: typeof fetch = fetch): Promise<Answers> {
+export async function askLaya(cfg: Pick<LayaConfig, 'url' | 'timeoutMs'> & LayaCall, body: Record<string, unknown>, fetchFn: typeof fetch = fetch): Promise<Answers> {
   const res = await fetchFn(`${cfg.url.replace(/\/+$/, '')}/v1/systemone`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeaders(cfg) },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(cfg.timeoutMs),
   })
@@ -378,7 +396,7 @@ export async function askLaya(cfg: Pick<LayaConfig, 'url' | 'timeoutMs'>, body: 
  * ask, decide. A rule or @mention Laya refuses (too many tokens for an option) is
  * left out and the question asked again.
  */
-export async function judge(cfg: LayaConfig, o: { bot: string; rules: TriggerRules; newest: ChatLine; earlier: ChatLine[]; people?: Person[]; mentioned?: Person[] }, fetchFn: typeof fetch = fetch): Promise<Verdict> {
+export async function judge(cfg: LayaConfig & LayaCall, o: { bot: string; rules: TriggerRules; newest: ChatLine; earlier: ChatLine[]; people?: Person[]; mentioned?: Person[] }, fetchFn: typeof fetch = fetch): Promise<Verdict> {
   if (o.people && twoWay(o.bot, o.newest, o.people, o.mentioned)) return { yes: true, p: 1, why: `only @${clip(o.newest.user, 40)} and the bot in this thread` }
   const rules = usableRules(o.rules)
   const kept: TriggerRules = { answer: [...rules.answer], ignore: [...rules.ignore] }
@@ -399,10 +417,26 @@ export async function judge(cfg: LayaConfig, o: { bot: string; rules: TriggerRul
   }
 }
 
-/** Whether Ollama serves the model (for `mmhub doctor`). */
-export async function layaReady(cfg: Pick<LayaConfig, 'url' | 'model'>, fetchFn: typeof fetch = fetch): Promise<string | undefined> {
+/**
+ * Why Laya can't answer yet, or undefined when it can (for `mmhub doctor`): Ollama
+ * without the model, or a server that isn't up. Ollama lists its models at
+ * /api/tags; Laya's own server (`laya-serve`, from `pip install "laya[serve]"`) has
+ * no such list and reports itself at /health instead, and judges the same way.
+ */
+export async function layaReady(cfg: Pick<LayaConfig, 'url' | 'model'> & LayaCall, fetchFn: typeof fetch = fetch): Promise<string | undefined> {
+  const get = (path: string) => fetchFn(`${cfg.url.replace(/\/+$/, '')}${path}`, { headers: authHeaders(cfg), signal: AbortSignal.timeout(3000) })
   try {
-    const res = await fetchFn(`${cfg.url.replace(/\/+$/, '')}/api/tags`, { signal: AbortSignal.timeout(3000) })
+    const res = await get('/api/tags')
+    if (res.status === 401 || res.status === 403) return `${cfg.url} refused the API key (HTTP ${res.status})`
+    if (res.status === 404) {
+      const h = await get('/health')
+      const j = (await h.json().catch(() => ({}))) as { status?: string }
+      if (!h.ok || j.status !== 'ok') return h.ok || h.status !== 404 ? `laya-serve at ${cfg.url}: ${j.status ?? `HTTP ${h.status}`}` : `${cfg.url} is neither Ollama nor laya-serve`
+      // /health needs no key, so check it with a request it refuses (400, before the model runs) or turns away (401).
+      const k = await fetchFn(`${cfg.url.replace(/\/+$/, '')}/v1/systemone`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders(cfg) }, body: '{}', signal: AbortSignal.timeout(3000) })
+      if (k.status === 401 || k.status === 403) return `laya-serve at ${cfg.url} refused the API key (HTTP ${k.status})`
+      return undefined
+    }
     if (!res.ok) return `Ollama at ${cfg.url}: HTTP ${res.status}`
     const j = (await res.json()) as { models?: { name?: string; model?: string }[] }
     const want = cfg.model.includes(':') ? cfg.model : `${cfg.model}:latest`
@@ -410,6 +444,6 @@ export async function layaReady(cfg: Pick<LayaConfig, 'url' | 'model'>, fetchFn:
     if (!names.includes(want) && !names.includes(cfg.model)) return `Ollama at ${cfg.url} doesn't have ${cfg.model}: ollama pull ${cfg.model}`
     return undefined
   } catch (err) {
-    return `Ollama unreachable at ${cfg.url} (${err instanceof Error ? err.message : String(err)})`
+    return `nothing answers at ${cfg.url} (${err instanceof Error ? err.message : String(err)}): start Ollama, or laya-serve`
   }
 }

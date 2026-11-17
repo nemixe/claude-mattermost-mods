@@ -173,7 +173,54 @@ next post.
 A mention always works and skips Laya. If Laya is down or slow (5 s), replies in
 followed threads go to the router as usual; `mmhub doctor` shows whether Laya is ready. The `laya` model is English-only. For other languages, set
 `"laya": {"model": "laya:322m-multilingual-bf16"}` in `config.json` (after
-`ollama pull laya:322m-multilingual-bf16`), then run `mmhub reload`.
+`ollama pull laya:322m-multilingual-bf16`), then run `mmhub reload`, or use
+laya-serve, which picks the model by each post's language.
+
+### Without Ollama: laya-serve
+
+Laya's makers also publish a Python server, `laya-serve`, that answers the same
+requests. Measured on the same 540 posts, it made the same decision as Ollama on every
+one. The hub can install and run it for you:
+
+```bash
+mmhub laya install
+```
+
+This needs [uv](https://docs.astral.sh/uv/) (`brew install uv`), which also fetches the
+Python it uses. It puts about 2.2 GB in `<state>/laya`: Python 3.12 with PyTorch and the
+pinned `laya` package, the English model (the one Ollama's `laya` is) and the
+multilingual one (100+ languages), and a random API key (mode 0600). It then points
+`config.json` at it (port 8788, model `auto`: each post goes to the English or the
+multilingual model by its language) and reloads the hub. `--english-only` skips the
+multilingual model, `--port N` and `--device cpu|mps|cuda` change the defaults.
+`--unload-after MIN` sets when idle models are freed (below).
+
+From then on the hub runs it in the tmux session `mmhub-laya` while some workspace's
+trigger is `laya`, and starts it again if it exits (after 10 minutes if it died within 2
+minutes of starting; `mmhub laya logs` shows why). It listens on 127.0.0.1 only, judges
+only requests that carry the key (the hub sends it; its `/health` needs none), and works
+offline: the models are downloaded at install. The first post after a start would take a few seconds more, so the
+hub sends one small request first.
+
+**Memory.** With its models loaded, laya-serve takes about 3.6 GB (2.8 GB of it on the
+GPU; Ollama's `laya` takes about 0.9 GB). So, like Ollama, it frees them after 5 minutes
+without a post and keeps about 0.5 GB. The next post loads the English model again and
+takes about 2–3 s instead of 0.1–0.2 s, inside the 5 s limit. The multilingual model loads
+only for a post in another language. `--unload-after 0` keeps them loaded.
+
+```
+mmhub laya status            # installed version, device, loaded models, who uses it
+mmhub laya restart | logs [-n N]
+mmhub laya use ollama        # back to Ollama; laya-serve stays installed
+mmhub laya use serve         # and back
+mmhub laya uninstall         # remove it, its models and key; back to Ollama
+```
+
+It wants a GPU (Apple silicon or NVIDIA): on an Apple GPU a post takes about 0.2 s,
+like Ollama, but on CPU alone about 2 s, and 1 in 20 posts takes over the 5 s limit
+(that reply then reaches the router unjudged). On posts in English, `auto` decided like the
+English model alone; the multilingual model alone did worse (36 of 528 replies not
+for the bot let through, against 6).
 
 ## Other workspaces and DMs
 
@@ -246,6 +293,7 @@ mmhub ws list | create <name> [desc] | bind <ws> <channel-id> | unbind <channel-
 mmhub repo add <ws> <path|git-url> [--name n] | rm <ws> <name>
 mmhub lookup user <username> | lookup channel <team> <channel>
 mmhub agent install | uninstall                         # macOS: start the hub at login (launchd)
+mmhub laya install [--port N] [--device D] [--english-only] | status | restart | logs | use ollama|serve | uninstall
 mmhub provider list | add <name> <kind> [--env K=V]… | login <name> | secret <name> <VAR> | check <name>
 mmhub provider use <ws|--hub> <name>… | use <ws> --inherit | reset <name> | rm <name> [--purge]
 ```

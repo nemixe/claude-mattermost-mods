@@ -19,6 +19,12 @@
  *   mmhub repo add <ws> <path|git-url> [--name <n>] | rm <ws> <name>
  *   mmhub lookup user <username> | lookup channel <team> <channel>   Mattermost ids
  *   mmhub agent install|uninstall   (macOS) start the hub at login via launchd
+ *   mmhub laya install [--port N] [--device cpu|mps|cuda] [--english-only] [--unload-after MIN]
+ *                                   Laya without Ollama: install Laya's own server (laya-serve, Python via
+ *                                   uv) and its English and multilingual models in the state dir; the hub
+ *                                   then keeps it running while a workspace uses Laya (the models are
+ *                                   freed after 5 idle minutes, or MIN; 0 keeps them loaded)
+ *   mmhub laya status | restart | logs [-n N] | use ollama|serve | uninstall
  *   mmhub reload                    re-read config.json (sessions move if their provider changed)
  *
  * Providers (the login or API each workspace's sessions run on, in fallback order):
@@ -37,10 +43,14 @@
  */
 
 import { spawn as nodeSpawn } from 'child_process'
-import { existsSync, mkdirSync, openSync, readFileSync, statSync, writeFileSync } from 'fs'
+import { randomBytes } from 'crypto'
+import { existsSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs'
+import { homedir } from 'os'
 import { join } from 'path'
 import { roundTrip, type HubMsg } from './shared/ipc'
-import { DEFAULT_TRIGGER_MD, layaReady, loadTrigger, triggerFile } from './hub/laya'
+import { DEFAULT_LAYA, DEFAULT_TRIGGER_MD, layaReady, loadTrigger, triggerFile, type LayaCall, type LayaConfig, type ServeConfig } from './hub/laya'
+import { DEFAULT_SERVE_PORT, DEFAULT_UNLOAD_MINUTES, installed, installedVersion, LAYA_PACKAGE, LAYA_PYTHON, SERVE_MODELS, SERVE_SESSION, serveEnv, serveKey, servePaths, startServe, warmUp } from './hub/layaserve'
+import { cleanEnv, Tmux } from './hub/tmux'
 import { paths, ROOT } from './shared/paths'
 import { SESSION_KEY_RE, type HubSnapshot, type SessionSnapshot } from './shared/snapshot'
 import { errMsg, fmtAge, isPidAlive, readEnvFile, readJson, writeJsonAtomic } from './shared/util'
@@ -317,8 +327,10 @@ async function doctor(): Promise<never> {
   }
   const byLaya = listWorkspaces(cfg).filter(w => effective(cfg, w).trigger === 'laya').map(w => w.name)
   if (byLaya.length) {
-    const why = await layaReady(cfg.laya)
-    check(!why, `Laya (${cfg.laya.model} at ${cfg.laya.url}) for ${byLaya.join(', ')}: ${why ?? 'ready'}`)
+    const why = await layaReady(layaOf(cfg.laya))
+    const where = cfg.laya.serve ? `laya-serve at ${cfg.laya.url}, model ${cfg.laya.model}` : `${cfg.laya.model} at ${cfg.laya.url}`
+    const fix = cfg.laya.serve && why ? (installed(servePaths(p)) ? ' (mmhub laya status; mmhub laya logs)' : ' (not installed: mmhub laya install)') : ''
+    check(!why, `Laya (${where}) for ${byLaya.join(', ')}: ${why ?? 'ready'}${fix}`)
   }
   const up = await hubRunning()
   check(true, `hub ${up ? `running (pid ${lockPid() ?? '?'})` : 'not running — mmhub start'}`)
@@ -391,7 +403,7 @@ async function ws(): Promise<never> {
         writeFileSync(triggerFile(w.dir), DEFAULT_TRIGGER_MD, { mode: 0o644 })
         made = `; wrote the starter rules to ${triggerFile(w.dir)}`
       }
-      const why = await layaReady(cfg.laya)
+      const why = await layaReady(layaOf(cfg.laya))
       out(true, `workspace ${w.name}: the bot follows threads it is @mentioned in, and Laya decides which replies without a mention reach it until the router unfollows${made}${why ? `. ⚠️ not working yet: ${why} (until it is, every reply in a followed thread reaches the router)` : ''}`)
     }
     case 'bind': {
@@ -536,6 +548,171 @@ function parseAddFlags(rest: string[]): { def: Partial<ProviderDef>; errors: str
     else errors.push(`unknown flag ${a.slice(0, 40)}`)
   }
   return { def, errors }
+}
+
+/** The hub's Laya settings, with laya-serve's API key when the hub runs it. */
+function layaOf(c: LayaConfig): LayaConfig & LayaCall {
+  return c.serve ? { ...c, apiKey: serveKey(servePaths(p)) } : c
+}
+
+/** Loads the checkpoints the way laya-serve does (downloading them into HF_HOME), on CPU. */
+const LOAD_MODELS_PY = 'import laya.serve as s; s.build_router(); print("models ready", flush=True)'
+
+/** `mmhub laya …`: Laya's own server, installed and run by the hub instead of Ollama (layaserve.ts). */
+async function laya(): Promise<never> {
+  const cfg = loadConfig(p.config)
+  const sp = servePaths(p)
+  const [, sub, ...rest] = args
+  const PATH = cfg.path ?? process.env.PATH ?? '/usr/bin:/bin'
+  const tmux = () => new Tmux(cfg.tmuxSocket, cleanEnv({ ...process.env, PATH }), Bun.which('tmux', { PATH }) ?? 'tmux')
+  const flag = (name: string) => {
+    const i = rest.indexOf(name)
+    return i >= 0 ? rest[i + 1] : undefined
+  }
+  const saved = join(sp.dir, 'serve.json')
+  /** Point config.json at laya-serve (or back at Ollama), and tell a running hub. */
+  const useConfig = async (serve: ServeConfig | undefined): Promise<string> => {
+    const raw = readJson<Record<string, unknown>>(p.config, () => ({}))
+    const prev = (raw.laya ?? {}) as Record<string, unknown>
+    const { serve: _old, ...others } = prev
+    raw.laya = serve
+      ? { ...others, url: `http://127.0.0.1:${serve.port}`, model: serve.models.length > 1 ? 'auto' : 'laya', serve }
+      : { ...others, url: DEFAULT_LAYA.url, model: DEFAULT_LAYA.model }
+    writeJsonAtomic(p.config, raw)
+    if (!(await hubRunning())) return 'The hub is not running; it starts laya-serve when it starts (mmhub start).'
+    const r = await controlOp('reload')
+    return r.ok ? 'The hub has the new settings.' : `The hub didn't reload: ${r.error ?? r.text ?? 'no reason given'}.`
+  }
+  const step = async (what: string, cmd: string[], env?: Record<string, string>, tries = 1): Promise<void> => {
+    for (let i = 1; ; i++) {
+      process.stderr.write(`${what}…\n`)
+      const pr = Bun.spawn(cmd, { stdin: 'ignore', stdout: 2, stderr: 2, env: { ...process.env, PATH, ...env } })
+      if ((await pr.exited) === 0) return
+      if (i >= tries) out(false, `${what} failed (exit ${pr.exitCode}); nothing was switched over. Run it again to retry.`)
+      process.stderr.write(`${what} failed; trying again (${i + 1} of ${tries})\n`)
+      await Bun.sleep(5000)
+    }
+  }
+  const usersWorkspaces = () => listWorkspaces(cfg).filter(w => effective(cfg, w).trigger === 'laya').map(w => w.name)
+
+  switch (sub) {
+    case 'install': {
+      const port = Number(flag('--port') ?? cfg.laya.serve?.port ?? DEFAULT_SERVE_PORT)
+      if (!Number.isInteger(port) || port < 1024 || port > 65535) out(false, '--port must be a number from 1024 to 65535')
+      const device = flag('--device') ?? cfg.laya.serve?.device
+      if (device && !/^(cpu|mps|xpu|cuda(:\d+)?)$/.test(device)) out(false, '--device must be cpu, mps, cuda (or cuda:N) or xpu')
+      const models = rest.includes('--english-only') ? ['english'] : [...SERVE_MODELS]
+      const unload = flag('--unload-after') !== undefined ? Number(flag('--unload-after')) : cfg.laya.serve?.unloadAfterMinutes
+      if (unload !== undefined && !(Number.isFinite(unload) && unload >= 0 && unload <= 1440)) out(false, '--unload-after takes minutes, 0 to 1440 (0 keeps the models loaded)')
+      const serve: ServeConfig = { port, models, ...(device ? { device } : {}), ...(unload !== undefined ? { unloadAfterMinutes: unload } : {}) }
+      const uv = Bun.which('uv', { PATH }) ?? [join(homedir(), '.local', 'bin', 'uv'), join(homedir(), '.cargo', 'bin', 'uv')].find(f => existsSync(f))
+      if (!(await tmux().has(SERVE_SESSION)) && (await listening(port))) out(false, `something else listens on 127.0.0.1:${port}: choose another port with --port N`)
+      if (!uv) out(false, 'mmhub laya install needs uv, which also installs the Python it uses: run `curl -LsSf https://astral.sh/uv/install.sh | sh` (or `brew install uv`), then run this again')
+      mkdirSync(sp.dir, { recursive: true, mode: 0o700 })
+      process.stderr.write(`Installing laya-serve into ${sp.dir} (about 2.2 GB: Python with PyTorch, and the ${models.join(' and ')} model${models.length > 1 ? 's' : ''}).\n`)
+      if (!existsSync(sp.python)) await step(`Python ${LAYA_PYTHON}`, [uv!, 'venv', '--clear', '--python', LAYA_PYTHON, sp.venv])
+      await step(`${LAYA_PACKAGE}`, [uv!, 'pip', 'install', '--python', sp.python, LAYA_PACKAGE])
+      const loadEnv = { ...serveEnv({ ...serve, device: 'cpu' }, sp), HF_HUB_OFFLINE: '0' }
+      await step(`The model${models.length > 1 ? 's' : ''} (${models.join(', ')})`, [sp.python, '-c', LOAD_MODELS_PY], loadEnv, 3)
+      if (!existsSync(sp.key)) writeFileSync(sp.key, randomBytes(32).toString('hex') + '\n', { mode: 0o600 })
+      writeJsonAtomic(saved, serve)
+      // A server from an earlier install runs the old settings: replace it.
+      await tmux().kill(SERVE_SESSION)
+      const told = await useConfig(serve)
+      const ws = usersWorkspaces()
+      if (!ws.length) out(true, `laya-serve ${installedVersion(sp) ?? ''} installed; config.json now uses it (port ${port}, model ${serve.models.length > 1 ? 'auto: English or multilingual by language' : 'English'}). No workspace uses Laya yet: mmhub ws trigger <workspace> laya. ${told}`)
+      if (!(await hubRunning())) out(true, `laya-serve installed; config.json now uses it. ${told}`)
+      process.stderr.write('Waiting for laya-serve to load its models…\n')
+      const state = await warmUp(loadConfig(p.config).laya, serveKey(sp))
+      out(state.startsWith('ready'), `laya-serve ${installedVersion(sp) ?? ''} on 127.0.0.1:${port} for ${ws.join(', ')}: ${state}. ${health(await healthOf(loadConfig(p.config).laya))}`)
+    }
+    case 'status': {
+      const c = cfg.laya
+      const lines = [
+        installed(sp) ? `laya-serve ${installedVersion(sp) ?? '?'} installed in ${sp.dir}` : `laya-serve is not installed (mmhub laya install)`,
+        c.serve ? `config.json: laya-serve on port ${c.serve.port}, models ${c.serve.models.join(', ')}, model ${c.model}${c.serve.device ? `, device ${c.serve.device}` : ''}, ${unloading(c.serve)}` : `config.json: Ollama at ${c.url} (model ${c.model})`,
+      ]
+      if (c.serve) {
+        lines.push(`tmux session ${SERVE_SESSION}: ${(await tmux().has(SERVE_SESSION)) ? 'running' : 'not running'}`)
+        const why = await layaReady(layaOf(c))
+        lines.push(why ? `not answering: ${why}` : `answering. ${health(await healthOf(c))}`)
+        const ws = usersWorkspaces()
+        lines.push(ws.length ? `used by ${ws.join(', ')}` : 'no workspace uses Laya, so the hub does not start it')
+      }
+      out(true, lines.join('\n'))
+    }
+    case 'restart': {
+      const serve = cfg.laya.serve
+      if (!serve || !installed(sp)) out(false, 'the hub does not run laya-serve (mmhub laya install)')
+      const t = tmux()
+      await t.kill(SERVE_SESSION)
+      // The hub may have started it again in the meantime.
+      if (!(await t.has(SERVE_SESSION))) await startServe(t, serve!, sp)
+      process.stderr.write('Restarted; waiting for it to load its models…\n')
+      const state = await warmUp(cfg.laya, serveKey(sp))
+      out(state.startsWith('ready'), `laya-serve: ${state}`)
+    }
+    case 'logs': {
+      const n = Math.max(1, Number(flag('-n') ?? 40) || 40)
+      if (!existsSync(sp.log)) out(true, 'no log yet')
+      out(true, readFileSync(sp.log, 'utf8').trimEnd().split('\n').slice(-n).join('\n'))
+    }
+    case 'use': {
+      const to = rest[0]
+      if (to === 'ollama') {
+        const told = await useConfig(undefined)
+        await tmux().kill(SERVE_SESSION)
+        out(true, `config.json uses Ollama at ${DEFAULT_LAYA.url} again (model ${DEFAULT_LAYA.model}); laya-serve stopped and stays installed. ${told}`)
+      }
+      if (to === 'serve') {
+        if (!installed(sp)) out(false, 'laya-serve is not installed: mmhub laya install')
+        const serve = readJson<ServeConfig | undefined>(saved, () => undefined) ?? { port: DEFAULT_SERVE_PORT, models: [...SERVE_MODELS] }
+        out(true, `config.json uses laya-serve again (port ${serve.port}). ${await useConfig(serve)}`)
+      }
+      out(false, 'usage: mmhub laya use ollama|serve')
+    }
+    case 'uninstall': {
+      if (cfg.laya.serve) await useConfig(undefined)
+      await tmux().kill(SERVE_SESSION)
+      if (existsSync(sp.dir)) rmSync(sp.dir, { recursive: true, force: true })
+      out(true, `laya-serve removed (${sp.dir}, with its models and key); config.json uses Ollama at ${DEFAULT_LAYA.url}`)
+    }
+    default:
+      out(false, 'usage: mmhub laya install [--port N] [--device cpu|mps|cuda] [--english-only] [--unload-after MIN] | status | restart | logs [-n N] | use ollama|serve | uninstall')
+  }
+}
+
+/** Whether anything accepts connections on 127.0.0.1:port. */
+async function listening(port: number): Promise<boolean> {
+  try {
+    const s = await Bun.connect({ hostname: '127.0.0.1', port, socket: { data() {} } })
+    s.end()
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** laya-serve's /health: the device and the loaded checkpoints. */
+async function healthOf(c: LayaConfig): Promise<{ device?: string; loaded?: string[] } | undefined> {
+  try {
+    const r = await fetch(`${c.url.replace(/\/+$/, '')}/health`, { headers: { Authorization: `Bearer ${serveKey(servePaths(p)) ?? ''}` }, signal: AbortSignal.timeout(3000) })
+    return r.ok ? ((await r.json()) as { device?: string; loaded?: string[] }) : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function unloading(s: ServeConfig): string {
+  const m = s.unloadAfterMinutes ?? DEFAULT_UNLOAD_MINUTES
+  return m > 0 ? `models freed after ${m} idle min` : 'models kept loaded'
+}
+
+function health(h: { device?: string; loaded?: string[] } | undefined): string {
+  if (!h) return ''
+  if (!h.loaded?.length) return `Device ${h.device ?? '?'}, no model loaded (freed while idle; the next post loads one, about 2-3 s).`
+  const cpu = h.device === 'cpu' ? ' On CPU a post takes about 2 s, and some take longer than the 5 s limit (then the reply reaches the router unjudged); a GPU, or Ollama, is faster.' : ''
+  return `Device ${h.device ?? '?'}, loaded ${h.loaded.join(', ')}.${cpu}`
 }
 
 async function provider(): Promise<never> {
@@ -795,6 +972,7 @@ async function main(): Promise<never> {
   switch (args[0]) {
     case 'lookup': return lookup()
     case 'agent': return agent()
+    case 'laya': return laya()
     case 'start': return start()
     case 'stop': return stop()
     case 'status': return status()

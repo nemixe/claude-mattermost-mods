@@ -279,6 +279,21 @@ describe('the Ollama call', () => {
     } finally {
       s.srv.stop(true)
     }
-    expect(await layaReady({ url: 'http://127.0.0.1:9', model: 'laya' })).toContain('Ollama unreachable')
+    expect(await layaReady({ url: 'http://127.0.0.1:9', model: 'laya' })).toContain('nothing answers at http://127.0.0.1:9')
+  })
+
+  test("readiness of Laya's own server (laya-serve): no model list, but /health", async () => {
+    let health: Response = Response.json({ status: 'ok', loaded: ['english'], device: 'mps' })
+    const srv = Bun.serve({ port: 0, fetch: req => (new URL(req.url).pathname === '/health' ? health.clone() : new Response('Not Found', { status: 404 })) })
+    const url = `http://127.0.0.1:${srv.port}`
+    try {
+      expect(await layaReady({ url, model: 'laya' })).toBeUndefined() // the model name doesn't matter to it
+      health = Response.json({ status: 'loading' })
+      expect(await layaReady({ url, model: 'laya' })).toBe(`laya-serve at ${url}: loading`)
+      health = new Response('Not Found', { status: 404 })
+      expect(await layaReady({ url, model: 'laya' })).toBe(`${url} is neither Ollama nor laya-serve`)
+    } finally {
+      srv.stop(true)
+    }
   })
 })

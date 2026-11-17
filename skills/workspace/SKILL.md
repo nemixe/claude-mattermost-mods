@@ -70,9 +70,16 @@ Arguments passed: `$ARGUMENTS`
   nor is a greeting. Thanks reach the bot only right after its own post. Once unfollowed, only a mention reaches the bot,
   and it follows the thread again. DMs skip all of this: every DM reaches the bot. Run
   `mmhub ws trigger <ws> laya`: it writes starter rules if there are none and says
-  whether Laya is ready. If it isn't, the user runs `ollama pull laya` (Ollama 0.40 or
-  newer) themselves. `laya` is English-only; for other languages suggest
-  `laya:322m-multilingual-bf16` in config.json `laya.model`, then `mmhub reload`. Help
+  whether Laya is ready. If it isn't, there are two ways. With Ollama (0.40 or newer)
+  the user runs `ollama pull laya` themselves; `laya` is English-only, so for other
+  languages suggest `laya:322m-multilingual-bf16` in config.json `laya.model`, then
+  `mmhub reload`. Without Ollama, the hub installs and runs Laya's own server: tell the
+  user it downloads about 2.2 GB into the state dir, wants a GPU (Apple silicon or
+  NVIDIA) and about 3.6 GB of memory while it judges posts (0.5 GB after 5 idle
+  minutes), and that it needs uv (`brew install uv`). On their yes run `mmhub laya install`
+  (several minutes: run it in the background). It brings the English and multilingual
+  models and picks one by each post's language. `mmhub laya status` shows how it is
+  doing, `mmhub laya use ollama` switches back. Help
   the user write the rules: one per line, specific ("Lunch plans", "Questions about the
   deploy pipeline"), at most 150 characters and 24 rules. Each rule is checked on its own
   and decides only when Laya is sure it fits, so vague rules do nothing. Without an

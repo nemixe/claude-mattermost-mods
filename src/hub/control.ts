@@ -19,6 +19,7 @@ export async function control(hub: Hub, op: string, args: Record<string, unknown
       hub.reloadConfig()
       // Changed provider chains: live sessions move over (after their current turn).
       const moved = await hub.enqueue(() => hub.rebalanceProviders())
+      await hub.enqueue(() => hub.keepLaya()) // laya-serve switched on, or its port changed
       hub.status.write()
       return { ok: true, message: `config reloaded${moved ? `; ${moved} session${moved === 1 ? '' : 's'} moving to another provider` : ''}` }
     }

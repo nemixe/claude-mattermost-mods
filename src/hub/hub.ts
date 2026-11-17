@@ -20,6 +20,7 @@ import { answerWorkspace, askWorkspace, runCommand } from './commands'
 import { buildDigest } from './digest'
 import { decideInbound, decideReaction, type InboundAction } from './inbound'
 import { dmReply } from './links'
+import { keepServing, serveKey, servePaths, warmUp, type Keeper } from './layaserve'
 import { classifyLater, following, inDM, noteDM, setFollowing, takeSkipped } from './trigger'
 import { canRestartNow, classifyFailure, dueForIdleClose, isLive, looksBusy, noticeForRetry, pickEvictee, planStart, RestartBudget, retryDelay, type ReapView } from './lifecycle'
 import type { Mattermost, MMPost, MMReaction } from './mattermost'
@@ -120,6 +121,7 @@ export class Hub {
   private restarts = new RestartBudget()
   private locks = new Map<string, Promise<unknown>>()
   private timers: ReturnType<typeof setInterval>[] = []
+  private layaKeeper: Keeper = {}
   /** When the hub's own 3 s timer last ran (the ticker checks it still does). */
   private timerAt = Date.now()
   private ticker?: Ticker
@@ -1315,7 +1317,28 @@ export class Hub {
   // ------------------------------------------------------------------ periodic work
 
   /** Reaper + watchdogs. Call on the chain. */
+  /**
+   * laya-serve, when the hub runs it (layaserve.ts): start it if a workspace uses
+   * Laya and its session is gone, then warm it up off the chain.
+   */
+  async keepLaya(): Promise<void> {
+    if (!this.cfg.laya.serve) return
+    const sp = servePaths(this.p)
+    const wanted = listWorkspaces(this.cfg).some(w => effective(this.cfg, w).trigger === 'laya')
+    try {
+      const r = await keepServing({ tmux: this.tmux, laya: this.cfg.laya, sp, wanted, k: this.layaKeeper, now: Date.now() })
+      if (r === 'started') void warmUp(this.cfg.laya, serveKey(sp)).then(m => log('trigger', `laya-serve: ${m}`))
+      else if (r === 'not installed' && !this.layaKeeper.warned) {
+        this.layaKeeper.warned = true
+        log('trigger', `laya-serve is configured but not installed in ${sp.dir}: mmhub laya install`)
+      }
+    } catch (err) {
+      log('trigger', `laya-serve: could not start it: ${errMsg(err)}`)
+    }
+  }
+
   async reap(): Promise<void> {
+    await this.keepLaya()
     const now = Date.now()
     const liveRows = this.store.sessions().filter(s => isLive(s.status))
     for (const s of liveRows) {
@@ -1494,6 +1517,7 @@ export class Hub {
       onDisconnect: () => this.status.changed(),
     })
     this.armTimers()
+    void this.enqueue(() => this.keepLaya())
     // Ticks that keep coming after the machine sleeps (Bun's pending timers may not): see onTick.
     this.ticker = new Ticker((now, gap) => this.onTick(now, gap))
     this.ticker.start()
