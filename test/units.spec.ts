@@ -4,7 +4,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { paths } from '../src/shared/paths'
 import { chunk, PERMISSION_REPLY_RE } from '../src/shared/util'
-import { classifySender, defaultAccess, issuePairingCode, pruneExpired } from '../src/hub/access'
+import { classifySender, defaultAccess, isOwner, issuePairingCode, ownerNeedsBotCheck, pruneExpired } from '../src/hub/access'
 import { buildDigest } from '../src/hub/digest'
 import { instructionsFor, toolsFor } from '../src/bridge/tools'
 import { PermissionDesk, promptText } from '../src/hub/permissions'
@@ -79,6 +79,22 @@ describe('access', () => {
     expect(classifySender(a, 'X', 'C', 'O', false)).toBe('blocked')
     expect(classifySender(a, 'O', 'OTHER', 'O', false)).toBe('blocked')
     expect(classifySender(a, 'O', 'OTHER', 'O', true)).toBe('owner')
+  })
+
+  test('classifySender with "*": every person is an owner, bots are not', () => {
+    const a = { ...defaultAccess(), allowFrom: ['*', 'LISTED_BOT'], channels: { C: { allowFrom: ['M'] } } }
+    expect(classifySender(a, 'X', 'C', 'O', false)).toBe('owner')
+    expect(classifySender(a, 'X', 'D1', 'D', false)).toBe('owner') // a DM needs no pairing
+    expect(classifySender(a, 'X', 'OTHER', 'O', false)).toBe('blocked') // still only where the bot listens
+    expect(classifySender(a, 'B', 'C', 'O', false, true)).toBe('blocked') // a bot, not on the channel's member list
+    expect(classifySender(a, 'B', 'D1', 'D', false, true)).toBe('unknown')
+    expect(classifySender(a, 'LISTED_BOT', 'C', 'O', false, true)).toBe('owner') // listed by id
+    expect(classifySender({ ...a, dmPolicy: 'disabled' }, 'X', 'C', 'O', false)).toBe('blocked')
+    expect(isOwner(a, 'X')).toBe(true)
+    expect(isOwner(a, 'B', true)).toBe(false)
+    expect(ownerNeedsBotCheck(a, 'X')).toBe(true)
+    expect(ownerNeedsBotCheck(a, 'LISTED_BOT')).toBe(false)
+    expect(ownerNeedsBotCheck({ ...a, allowFrom: ['O'] }, 'X')).toBe(false)
   })
 })
 

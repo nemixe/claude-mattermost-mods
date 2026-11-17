@@ -4,9 +4,10 @@
  */
 
 import { PERMISSION_REPLY_RE } from '../shared/util'
-import { classifySender, requiresMention, type Access, type SenderRole } from './access'
+import { classifySender, isOwner, requiresMention, type Access, type SenderRole } from './access'
+import { isBotPost } from './mattermost'
 
-export type InboundPost = { id: string; root_id: string; user_id: string; channel_id: string; message: string; type?: string }
+export type InboundPost = { id: string; root_id: string; user_id: string; channel_id: string; message: string; type?: string; props?: Record<string, unknown> }
 
 export type InboundInput = {
   post: InboundPost
@@ -78,7 +79,7 @@ export function decideInbound(i: InboundInput): InboundAction {
   if (post.user_id === bot.id) return { kind: 'ignore', reason: 'own post' }
   if (post.type) return { kind: 'ignore', reason: `system post ${post.type}` }
 
-  const role = classifySender(access, post.user_id, post.channel_id, i.channelType, !!i.workspace)
+  const role = classifySender(access, post.user_id, post.channel_id, i.channelType, !!i.workspace, isBotPost(post))
   if (role === 'blocked') return { kind: 'ignore', reason: 'sender not allowed here' }
   if (role === 'unknown') return { kind: 'pair' }
 
@@ -125,17 +126,18 @@ export function decideInbound(i: InboundInput): InboundAction {
 const ALLOW = new Set(['white_check_mark', 'heavy_check_mark', 'ballot_box_with_check', '+1', 'thumbsup'])
 const DENY = new Set(['x', 'no_entry', 'no_entry_sign', 'negative_squared_cross_mark', '-1', 'thumbsdown'])
 
-/** An owner's ✅/❌ on a 🔐 post answers that prompt. */
+/** An owner's ✅/❌ on a 🔐 post answers that prompt. `reactorIsBot`: the reacting account is a bot (it matters under `"*"`). */
 export function decideReaction(
   r: { user_id: string; post_id: string; emoji_name: string },
   bot: { id: string },
   access: Access,
   promptCodeForPost: (postId: string) => string | undefined,
+  reactorIsBot = false,
 ): InboundAction {
   if (r.user_id === bot.id) return { kind: 'ignore', reason: 'own reaction' }
   const code = promptCodeForPost(r.post_id)
   if (!code) return { kind: 'ignore', reason: 'not a permission prompt' }
-  if (!access.allowFrom.includes(r.user_id)) return { kind: 'ignore', reason: 'only owners answer prompts' }
+  if (!isOwner(access, r.user_id, reactorIsBot)) return { kind: 'ignore', reason: 'only owners answer prompts' }
   const behavior = ALLOW.has(r.emoji_name) ? 'allow' : DENY.has(r.emoji_name) ? 'deny' : undefined
   if (!behavior) return { kind: 'ignore', reason: `emoji ${r.emoji_name}` }
   return { kind: 'permission', behavior, code }

@@ -30,7 +30,8 @@ import { errMsg, fmtAge, log } from '../shared/util'
 import { fmtLocal, hubTimezone, minGapMinutes, nextRun, parseCron, parseSchedule, ScheduleError, validTimezone } from './cron'
 import type { Hub } from './hub'
 import { requestChannel } from './links'
-import type { MMPost } from './mattermost'
+import { isOwner } from './access'
+import { isBotPost, type MMPost } from './mattermost'
 import type { JobRow, JobRunRow, ThreadRow } from './store'
 import { ToolError } from './tools'
 import { loadBindings } from './workspaces'
@@ -348,7 +349,7 @@ async function ownerAsked(hub: Hub, key: string, messageId: string | undefined):
     fail(`no message ${messageId}`)
   }
   const thread = hub.threadsOf(key).find(t => t.id === (post.root_id || post.id)) ?? fail(`message ${messageId} is not in your thread(s)`)
-  if (!hub.accessStore.load().allowFrom.includes(post.user_id)) {
+  if (post.user_id === hub.bot.id || !isOwner(hub.accessStore.load(), post.user_id, isBotPost(post))) {
     fail('only a hub owner can set up or remove scheduled jobs, and that message is not from one. Tell the person an owner has to ask.')
   }
   return { thread, who: `@${await hub.mm.username(post.user_id)}` }

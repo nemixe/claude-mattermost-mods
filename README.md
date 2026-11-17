@@ -55,7 +55,8 @@ the `/mm` panel. The CLI is `bun ~/claude-mattermost-mods/bin/mmhub` (alias it t
 1. `/mattermost-hub:configure <url> <bot-token>`, then `/mattermost-hub:configure path`
    (records PATH and absolute `claude`/`bun` for the daemon).
 2. `/mattermost-hub:access allow @your-username` — owners start threads and approve
-   permission prompts.
+   permission prompts. `/mattermost-hub:access allow *` makes every person an owner
+   (bots excluded; see [ACCESS.md](ACCESS.md)).
 3. Optionally edit `~/claude-workspaces/workspace-template/` (see [Workspace template](#workspace-template)).
    Then `/mattermost-hub:workspace create acme "Acme web app"`, then
    `/mattermost-hub:workspace repo add acme ~/code/acme-web` (or a git URL), and
@@ -240,7 +241,7 @@ A router or worker can ask another workspace, through that workspace's router:
   Follow-ups use `request_id`. Everything stays visible in the channel.
 - `send_dm(user, text)` DMs an **owner** (`access.json` `allowFrom`) from the bot; the
   owner's replies in that DM thread go back to the session. Others can't be DMed: the
-  hub takes DM replies from owners only.
+  hub takes DM replies from owners only. With `"*"` in `allowFrom`, any person can be DMed.
 - `list_workspaces` shows the other workspaces, which of them take requests, and the
   session's open requests and DMs.
 

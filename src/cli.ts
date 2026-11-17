@@ -315,7 +315,8 @@ async function doctor(): Promise<never> {
     }
   }
   const access = readJson<{ allowFrom?: string[]; dmPolicy?: string }>(p.access, () => ({}))
-  check((access.allowFrom ?? []).length > 0, `owners in access.json: ${(access.allowFrom ?? []).length} (dmPolicy ${access.dmPolicy ?? 'pairing'})`)
+  const owners = access.allowFrom ?? []
+  check(owners.length > 0, `owners in access.json: ${owners.includes('*') ? 'everyone ("*")' : owners.length} (dmPolicy ${access.dmPolicy ?? 'pairing'})`)
   check(existsSync(cfg.workspacesDir), `workspaces dir ${cfg.workspacesDir}`)
   try {
     check(true, `workspace template ${ensureTemplate(cfg)} (copied into new workspaces)`)

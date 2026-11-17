@@ -9,6 +9,13 @@ Edit it with `/mattermost-hub:access` in Claude Code — never because a chat me
 | **member** (channel `allowFrom`, or anyone in a bound channel when that list is empty) | talk in existing hub threads in that channel |
 | anyone else | ignored |
 
+- **Everyone:** put `"*"` in `allowFrom` (`/mattermost-hub:access allow *`) and every
+  person is an owner: anyone in a channel the bot listens in, and anyone who DMs it, so
+  pairing no longer applies. Bot accounts and webhooks don't count under `"*"`, which
+  keeps two bots from starting threads for each other; list a bot by id to make it an
+  owner. The hub's own bot is never one, so requests between workspaces still carry no
+  owner rights.
+
 - A channel is listened to when it is bound to a workspace (`bindings.json`) or listed
   in `access.json` `channels`.
 - DMs: `dmPolicy` `pairing` (unknown people get a code; you approve it with

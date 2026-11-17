@@ -19,6 +19,7 @@
  */
 
 import { fmtAge, log, safeName } from '../shared/util'
+import { EVERYONE } from './access'
 import type { Hub } from './hub'
 import type { MMPost } from './mattermost'
 import type { LinkRow, ThreadRow } from './store'
@@ -235,11 +236,19 @@ export async function sendDM(hub: Hub, key: string, a: { user?: string; text: st
 
 async function ownerNamed(hub: Hub, user: string): Promise<{ id: string; name: string }> {
   const want = user.trim().replace(/^@/, '').toLowerCase()
+  const owners = hub.accessStore.load().allowFrom
   const names: string[] = []
-  for (const id of hub.accessStore.load().allowFrom) {
+  for (const id of owners) {
+    if (id === EVERYONE) continue
     const name = await hub.mm.username(id)
     if (name.toLowerCase() === want || id === user.trim()) return { id, name }
     names.push(`@${name}`)
+  }
+  if (owners.includes(EVERYONE)) {
+    // "*": every person is an owner, so any person may be DMed. Not bot accounts, and never the hub's own.
+    const u = await hub.mm.userByName(want)
+    if (u && !u.is_bot && u.id !== hub.bot.id) return { id: u.id, name: u.username }
+    throw new ToolError(`@${want} is not a person on this Mattermost server. Sessions can DM people only, not bots.`)
   }
   throw new ToolError(`@${want} is not a hub owner. Sessions can DM owners only (${names.join(', ') || 'none set'}) — theirs are the only DM replies the hub takes. Ask anyone else in your thread.`)
 }

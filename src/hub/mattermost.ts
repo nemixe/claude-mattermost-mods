@@ -24,6 +24,12 @@ export type MMPost = {
 }
 
 export type MMUser = { id: string; username: string; is_bot?: boolean }
+
+/** Mattermost marks posts by bot accounts (`from_bot`) and incoming webhooks (`from_webhook`). */
+export function isBotPost(post: Pick<MMPost, 'props'>): boolean {
+  const p = post.props ?? {}
+  return p.from_bot === 'true' || p.from_bot === true || p.from_webhook === 'true' || p.from_webhook === true
+}
 export type MMChannel = { id: string; type: string; name: string; display_name: string; team_id: string }
 export type MMReaction = { user_id: string; post_id: string; emoji_name: string }
 

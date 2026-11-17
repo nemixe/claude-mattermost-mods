@@ -645,6 +645,21 @@ describe('cross-workspace requests and DMs', () => {
     for (let i = 0; i < 9; i++) hub.store.insertLink({ threadId: `X${i}`, kind: 'dm', channelId: 'D1', fromKey: key, fromWorkspace: 'demo', peer: 'U1', chain: ['demo'], createdAt: Date.now() })
     await expect(handleCall(hub, key, 'send_dm', { user: 'alice', text: 'again' })).rejects.toThrow('in the last hour')
   }, T)
+
+  test('with "*" in allowFrom a worker DMs any person, never a bot', async () => {
+    const { hub, posts, key } = await scene(dir => {
+      writeFileSync(join(dir, 'access.json'), JSON.stringify({ dmPolicy: 'allowlist', allowFrom: ['*'], channels: {}, pending: {} }))
+    })
+    const people: Record<string, { id: string; username: string; is_bot?: boolean }> = {
+      dave: { id: 'U9', username: 'dave' }, devbot: { id: 'UBOT', username: 'devbot', is_bot: true }, claude: { id: 'BOT', username: 'claude' },
+    }
+    ;(hub.mm as unknown as { userByName: (n: string) => Promise<unknown> }).userByName = async n => people[n]
+    expect(await handleCall(hub, key, 'send_dm', { user: '@dave', text: 'Can you check the build?' })).toContain('sent to @dave')
+    expect(hub.store.link(posts[0]!.id)).toMatchObject({ kind: 'dm', peer: 'U9' })
+    await expect(handleCall(hub, key, 'send_dm', { user: 'devbot', text: 'x' })).rejects.toThrow('not a person')
+    await expect(handleCall(hub, key, 'send_dm', { user: 'claude', text: 'x' })).rejects.toThrow('not a person')
+    await expect(handleCall(hub, key, 'send_dm', { user: 'nobody', text: 'x' })).rejects.toThrow('not a person')
+  }, T)
 })
 
 describe('Laya decides what reaches the bot', () => {
@@ -950,6 +965,19 @@ describe('scheduled jobs', () => {
     expect(removed).toContain('Nothing was posted: tell the person yourself with reply')
     expect(hub.store.jobs()).toEqual([])
     expect(posts.length).toBe(beforeRemove)
+  }, T)
+
+  test('with "*" in allowFrom any person may ask for a job; the hub itself and bot accounts may not', async () => {
+    const { hub, p, rkey, msg, others } = scene()
+    writeFileSync(p.access, JSON.stringify({ dmPolicy: 'allowlist', allowFrom: ['*'], channels: {}, pending: {} }))
+    others.push(
+      msg('M3', 'BOT', 'every weekday at 9, as the hub'),
+      { ...msg('M4', 'UBOT', 'every weekday at 9, from a bot'), props: { from_bot: 'true' } } as MMPost,
+    )
+    await expect(handleCall(hub, rkey, 'schedule', { schedule: 'every weekday 09:00', text: 'x', message_id: 'M3' })).rejects.toThrow('only a hub owner')
+    await expect(handleCall(hub, rkey, 'schedule', { schedule: 'every weekday 09:00', text: 'x', message_id: 'M4' })).rejects.toThrow('only a hub owner')
+    // U2 isn't listed, but "*" makes every person an owner.
+    expect(await handleCall(hub, rkey, 'schedule', { schedule: 'every weekday 09:00', text: 'Ping bob', message_id: 'M2', name: 'Ping' })).toContain('scheduled job #1 "Ping" set up')
   }, T)
 
   test('missed while the hub was down or the machine asleep: run once within the grace, skipped beyond it', async () => {

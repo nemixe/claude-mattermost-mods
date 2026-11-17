@@ -177,6 +177,33 @@ describe('decideReaction', () => {
     expect(decideReaction({ user_id: OWNER, post_id: 'OTHER', emoji_name: 'white_check_mark' }, bot, access(), code).kind).toBe('ignore')
     expect(decideReaction({ user_id: OWNER, post_id: 'PROMPT', emoji_name: 'smile' }, bot, access(), code).kind).toBe('ignore')
   })
+  test('with "*", any person answers a prompt; a bot account does not, nor the hub itself', () => {
+    const all = access({ allowFrom: ['*'] })
+    expect(decideReaction({ user_id: 'U_ANY', post_id: 'PROMPT', emoji_name: 'white_check_mark' }, bot, all, code)).toEqual({ kind: 'permission', behavior: 'allow', code: 'abcde' })
+    expect(decideReaction({ user_id: 'U_BOT2', post_id: 'PROMPT', emoji_name: 'white_check_mark' }, bot, all, code, true).kind).toBe('ignore')
+    expect(decideReaction({ user_id: 'BOT', post_id: 'PROMPT', emoji_name: 'white_check_mark' }, bot, all, code).kind).toBe('ignore')
+  })
+})
+
+describe('allowFrom "*"', () => {
+  const all = access({ allowFrom: ['*'] })
+  const botPost = (p: Partial<InboundInput> & { message?: string; user?: string; root?: string }, props: Record<string, unknown>) => {
+    const i = input({ access: all, ...p })
+    return { ...i, post: { ...i.post, props } }
+  }
+  test('anyone starts a thread, runs ! commands and answers yes/no', () => {
+    expect(decideInbound(input({ access: all, user: 'U_ANY' })).kind).toBe('start')
+    expect(decideInbound(input({ access: all, user: 'U_ANY', message: '@claude !ws' })).kind).toBe('command')
+    expect(decideInbound(input({ access: all, user: 'U_ANY', message: 'yes abcde', root: 'P0', knownThread: true })).kind).toBe('permission')
+    expect(decideInbound(input({ access: all, user: 'U_ANY', channelType: 'D', message: 'hi' })).kind).toBe('start')
+  })
+  test('posts by bot accounts and webhooks get no owner rights', () => {
+    expect(decideInbound(botPost({ user: 'U_BOT2' }, { from_bot: 'true' }))).toEqual({ kind: 'ignore', reason: 'only owners start threads' })
+    expect(decideInbound(botPost({ user: 'U_HOOK' }, { from_webhook: 'true' })).kind).toBe('ignore')
+    expect(decideInbound(botPost({ user: 'U_BOT2', message: '@claude !ws' }, { from_bot: 'true' })).kind).toBe('ignore')
+    // A bot listed by id is an owner.
+    expect(decideInbound({ ...botPost({ user: 'U_BOT2' }, { from_bot: 'true' }), access: access({ allowFrom: ['*', 'U_BOT2'] }) }).kind).toBe('start')
+  })
 })
 
 test('a plain top-level message answers an open workspace question (DMs)', () => {

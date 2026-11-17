@@ -45,7 +45,10 @@ Arguments passed: `$ARGUMENTS`
 Missing file = `{dmPolicy:"pairing", allowFrom:[], channels:{}, pending:{}}`.
 
 - **Owners** (`allowFrom`) start threads (by @mentioning the bot), answer 🔐 permission
-  prompts and run `!` commands. Only owners.
+  prompts and run `!` commands. Only owners. `"*"` in `allowFrom` makes **every person**
+  an owner: anyone in a channel the bot listens in, and anyone who DMs it (pairing no
+  longer applies to people). Bot accounts and webhooks don't count under `"*"`; list a
+  bot by id to make it an owner. The hub's own bot never is.
 - **Channels**: a channel bound to a workspace is listened to even without an entry
   here; an entry adds a policy. `allowFrom` there lists **members** who may talk in
   existing threads (empty = any member of the channel). Members cannot start threads
@@ -67,6 +70,10 @@ User ids are 26-char Mattermost ids. To find one: `mmhub lookup user <username>`
 - **`deny <code>`**: delete `pending[<code>]`.
 - **`allow <userId|@username>`** / **`remove <userId>`**: owners list. Resolve a @username
   with `mmhub lookup user`.
+- **`allow *`** / **`remove *`**: add or drop `"*"` (everyone is an owner), keeping the listed
+  ids. Before adding it, say plainly what it grants: anyone who can post where the bot
+  listens, or DM it, can start work, approve 🔐 prompts, run `!` commands (stop sessions,
+  `!cron`) and set up scheduled jobs. Status shows it as "everyone (*)".
 - **`policy <pairing|allowlist|disabled>`**: `dmPolicy`. `disabled` silences the hub entirely.
 - **`channel add <channelId> [--no-mention] [--allow id1,id2]`** / **`channel rm <channelId>`**.
 - **`set <key> <value>`**: `ackReaction` (emoji name or `""`), `requireMention` (bool),

@@ -20,7 +20,7 @@ export type ChannelPolicy = {
 
 export type Access = {
   dmPolicy: 'pairing' | 'allowlist' | 'disabled'
-  /** Owners: may start threads, answer permission prompts, run `!` commands. */
+  /** Owners: may start threads, answer permission prompts, run `!` commands. `"*"` makes every person an owner (see isOwner). */
   allowFrom: string[]
   channels: Record<string, ChannelPolicy>
   pending: Record<string, PendingEntry>
@@ -89,10 +89,28 @@ export type ChannelType = 'D' | 'G' | 'O' | 'P' | string
  */
 export type SenderRole = 'owner' | 'member' | 'unknown' | 'blocked'
 
+/** In `allowFrom`: every person is an owner. */
+export const EVERYONE = '*'
+
+/**
+ * Owner rights: the sender is listed in `allowFrom`, or `allowFrom` holds `"*"` and the sender is a
+ * person. Bot accounts and webhooks don't count under `"*"` (two bots could start threads for each
+ * other forever); list one by id to make it an owner. The hub's own bot is never an owner: callers
+ * drop its posts and reactions first.
+ */
+export function isOwner(a: Pick<Access, 'allowFrom'>, userId: string, isBot = false): boolean {
+  return a.allowFrom.includes(userId) || (!isBot && a.allowFrom.includes(EVERYONE))
+}
+
+/** True when only an is_bot lookup can tell whether `userId` is an owner (it is not listed, but `"*"` is). */
+export function ownerNeedsBotCheck(a: Pick<Access, 'allowFrom'>, userId: string): boolean {
+  return !a.allowFrom.includes(userId) && a.allowFrom.includes(EVERYONE)
+}
+
 /** A channel the bot listens in: listed in access.channels, or bound to a workspace. */
-export function classifySender(a: Access, senderId: string, channelId: string, channelType: ChannelType, isBound: boolean): SenderRole {
+export function classifySender(a: Access, senderId: string, channelId: string, channelType: ChannelType, isBound: boolean, isBot = false): SenderRole {
   if (a.dmPolicy === 'disabled') return 'blocked'
-  const owner = a.allowFrom.includes(senderId)
+  const owner = isOwner(a, senderId, isBot)
   if (channelType === 'D') {
     if (owner) return 'owner'
     return a.dmPolicy === 'pairing' ? 'unknown' : 'blocked'

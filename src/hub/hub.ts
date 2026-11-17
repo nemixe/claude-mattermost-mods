@@ -13,7 +13,7 @@ import type { Paths } from '../shared/paths'
 import { ROOT } from '../shared/paths'
 import type { HubSnapshot, CloseReason, ProviderLink, WorkspaceProvider } from '../shared/snapshot'
 import { chunk, errMsg, fmtAge, log, MAX_POST_CHARS, safeName, shortId } from '../shared/util'
-import { AccessStore, issuePairingCode, pruneExpired } from './access'
+import { AccessStore, issuePairingCode, ownerNeedsBotCheck, pruneExpired } from './access'
 import type { HubConfig } from './config'
 import { loadConfig } from './config'
 import { answerWorkspace, askWorkspace, runCommand } from './commands'
@@ -1284,7 +1284,12 @@ export class Hub {
   }
 
   async onReaction(r: MMReaction): Promise<void> {
-    const a = decideReaction(r, this.bot, this.accessStore.load(), id => this.desk.codeForPost(id))
+    const access = this.accessStore.load()
+    // Under "*" a bot account isn't an owner. Only then does a lookup decide it; a failed one counts as a bot.
+    const reactorIsBot = r.user_id !== this.bot.id && ownerNeedsBotCheck(access, r.user_id)
+      ? await this.mm.user(r.user_id).then(u => !!u.is_bot, () => true)
+      : false
+    const a = decideReaction(r, this.bot, access, id => this.desk.codeForPost(id), reactorIsBot)
     if (a.kind === 'permission') await this.answerPermission(a.code, a.behavior, r.user_id)
   }
 
