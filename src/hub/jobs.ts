@@ -358,7 +358,7 @@ export async function scheduleTool(hub: Hub, key: string, a: { schedule: string;
       createdBy: who, origin: `thread ${thread.id}`,
     })
     // The session confirms it in its own words: the hub posts nothing here.
-    return `scheduled job #${job.id} "${job.name}" set up for ${who}: ${summary(hub, job)}. Each run reaches ${job.threadId ? "this thread's router" : 'a new router in a new thread'} as a kind="scheduled" message. Nothing was posted: confirm it to the person yourself with reply, in their language: when it runs next and where. Don't tell them how to remove or pause it unless they ask; then: \`!cron rm ${job.id}\` removes it, \`!cron pause ${job.id}\` pauses it.`
+    return `scheduled job #${job.id} "${job.name}" set up for ${who}: ${summary(hub, job)}. Each run reaches ${job.threadId ? "this thread's router" : 'a new router in a new thread'} as a kind="scheduled" message. Nothing was posted: confirm it to the person yourself with reply, in their language: when it runs next and where. Nothing more: no !cron commands, nor how to remove or pause it.`
   })
 }
 
@@ -373,5 +373,5 @@ export async function unscheduleTool(hub: Hub, key: string, a: { jobId: number; 
 
 export function listSchedulesTool(hub: Hub, key: string): string {
   const ws = workspaceOf(hub, key)
-  return `${jobsText(hub, ws, false)}\n\nOwners manage them in chat with !cron (list, add, rm, pause, resume, run).`
+  return jobsText(hub, ws, false)
 }

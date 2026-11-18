@@ -337,8 +337,9 @@ workspace, where its runs go, and the instruction each run gets. Jobs live in `h
   anything red"*. The router calls `schedule` with the id of the owner's message (a
   worker can too, from the owner's words its task quotes). The hub checks that the
   message is in that session's thread and that its author is an owner, and the session
-  confirms it in the thread: when it runs next and where. It says how to remove or pause
-  the job only when asked.
+  confirms it in the thread: when it runs next and where, nothing more. Sessions never
+  mention the `!cron` commands; asked to remove or move a job, an owner's router does it
+  itself (`unschedule`, then `schedule`).
 - In chat: `!cron add every weekday 09:00 | check the alerts dashboard and post anything red`
   (runs open threads in this channel).
 - In a terminal: `mmhub cron add <ws> "every weekday 09:00" Check the alerts…`

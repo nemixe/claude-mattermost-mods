@@ -1147,10 +1147,13 @@ describe('scheduled jobs', () => {
     // The hub posts nothing: the session confirms it in its own words.
     expect(posts.length).toBe(posted)
     expect(res).toContain('Nothing was posted: confirm it to the person yourself with reply')
-    expect(res).toContain("Don't tell them how to remove or pause it unless they ask; then: `!cron rm 1` removes it")
+    expect(res).toContain('Nothing more: no !cron commands, nor how to remove or pause it.')
+    expect(res).not.toContain('!cron rm')
     const job = hub.store.job(1)!
     expect(job).toMatchObject({ workspace: 'demo', schedule: 'every weekday 09:00', cron: '0 9 * * 1-5', tz: 'Asia/Jakarta', channelId: 'C1', createdBy: '@alice', origin: 'thread T2', paused: false })
-    expect(await handleCall(hub, rkey, 'list_schedules', {})).toContain('#1 Morning alerts  [demo]')
+    const listed = await handleCall(hub, rkey, 'list_schedules', {})
+    expect(listed).toContain('#1 Morning alerts  [demo]')
+    expect(listed).not.toContain('!cron')
 
     // Not due yet: nothing. Due: a router of its own for a new thread in C1 gets the instruction, and the hub posts nothing.
     const slot = job.nextAt!
