@@ -15,8 +15,9 @@ import { listSchedulesTool, scheduleTool, unscheduleTool } from './jobs'
 import { forwardAnswer, linkedTo, listWorkspacesText, messageWorkspace, sendDM } from './links'
 import { inDM, setFollowing } from './trigger'
 import type { MMPost } from './mattermost'
-import type { ThreadRow } from './store'
+import { isDraft, type ThreadRow } from './store'
 import { effective, prepareWorktree } from './workspaces'
+import { listChannels, ownThread, postIdOf, readChannel, readOtherThread, searchMessages, threadText } from './explore'
 
 export class ToolError extends Error {}
 
@@ -62,14 +63,14 @@ function threadFor(hub: Hub, key: string, a: Args): ThreadRow {
     if (!threads[0]) throw new ToolError('this router has no thread')
     return threads[0]
   }
-  const id = str(a, 'thread_id')!
+  const id = hub.store.threadId(str(a, 'thread_id')!)
   const t = threads.find(x => x.id === id)
   if (!t) throw new ToolError(`thread ${id} is not linked to you (your threads: ${threads.map(x => x.id).join(', ') || 'none'})`)
   return t
 }
 
 /** The post must live in one of the session's threads, or in a request or DM thread it opened. */
-async function postInScope(hub: Hub, key: string, messageId: string): Promise<MMPost> {
+export async function postInScope(hub: Hub, key: string, messageId: string): Promise<MMPost> {
   const post = await hub.mm.getPost(messageId)
   const tid = post.root_id || post.id
   if (!scope(hub, key).some(t => t.id === tid) && !linkedTo(hub, key, tid)) throw new ToolError(`message ${messageId} is not in your thread(s)`)
@@ -78,7 +79,8 @@ async function postInScope(hub: Hub, key: string, messageId: string): Promise<MM
 
 /** A thread the session may read: its own, or a request or DM thread it opened. */
 function readableThread(hub: Hub, key: string, a: Args): string {
-  const id = str(a, 'thread_id', key.startsWith('w-'))
+  const raw = str(a, 'thread_id', key.startsWith('w-'))
+  const id = raw && hub.store.threadId(raw)
   if (id && linkedTo(hub, key, id)) return id
   const t = threadFor(hub, key, a)
   if (id && id !== t.id) throw new ToolError(`thread ${id} is not yours to read`)
@@ -101,9 +103,27 @@ function checkFiles(hub: Hub, files: string[]): void {
   }
 }
 
+/** Posts to a draft thread, one after another: the first opens it, the rest go under it. */
+const drafts = new Map<string, Promise<unknown>>()
+
 export async function postAs(hub: Hub, key: string, thread: ThreadRow, text: string, files: string[] = []): Promise<string[]> {
   if (!text.trim() && !files.length) throw new ToolError('empty reply')
   checkFiles(hub, files)
+  if (!isDraft(thread.id)) return postIn(hub, key, thread, text, files)
+  const id = thread.id
+  const run = (drafts.get(id) ?? Promise.resolve()).catch(() => {}).then(() => postIn(hub, key, hub.store.thread(id) ?? thread, text, files))
+  drafts.set(id, run)
+  void run.catch(() => {}).finally(() => {
+    if (drafts.get(id) === run) drafts.delete(id)
+  })
+  return run
+}
+
+/**
+ * Post in the thread, in chunks. In a draft thread (a scheduled run's) nothing is
+ * posted yet: the first chunk is a new post in the channel, which opens the thread.
+ */
+async function postIn(hub: Hub, key: string, thread: ThreadRow, text: string, files: string[]): Promise<string[]> {
   const access = hub.accessStore.load()
   const limit = Math.max(500, Math.min(access.textChunkLimit ?? MAX_POST_CHARS, MAX_POST_CHARS))
   const isWorker = key.startsWith('w-')
@@ -113,13 +133,20 @@ export async function postAs(hub: Hub, key: string, thread: ThreadRow, text: str
   const ids: string[] = []
   for (let i = 0; i < parts.length; i++) {
     const last = i === parts.length - 1
+    const opens = isDraft(thread.id)
     const post = await hub.mm.createPost({
       channel_id: thread.channelId,
-      root_id: thread.id,
+      ...(opens ? {} : { root_id: thread.id }),
       message: (i === 0 ? header : '') + parts[i]!,
       props: { mmhub_session: key },
       ...(last && fileIds.length ? { file_ids: fileIds } : {}),
     })
+    if (opens) {
+      hub.store.openDraft(thread.id, post.id)
+      log('threads', `${thread.id} opened by ${key}'s first post: thread ${post.id}`)
+      thread = hub.store.thread(post.id)!
+      hub.status.changed()
+    }
     ids.push(post.id)
     hub.store.insertPost({ id: post.id, threadId: thread.id, sessionKey: key, createAt: post.create_at, message: post.message })
   }
@@ -163,15 +190,8 @@ export async function reportToRouter(hub: Hub, key: string, thread: ThreadRow, t
 }
 
 async function fetchThread(hub: Hub, threadId: string, limit: number): Promise<string> {
-  const res = await hub.mm.getThread(threadId)
-  const posts = Object.values(res.posts).sort((a, b) => a.create_at - b.create_at).slice(-Math.max(1, Math.min(limit, 200)))
-  const lines: string[] = [`Thread ${threadId} (${hub.permalink(threadId)}), ${posts.length} post(s), oldest first:`]
-  for (const p of posts) {
-    const who = p.user_id === hub.bot.id ? `@${hub.bot.username}${p.props?.mmhub_session ? ` [${String(p.props.mmhub_session)}]` : ''}` : `@${await hub.mm.username(p.user_id)}`
-    const files = p.metadata?.files?.length ? ` [files: ${p.metadata.files.map(f => safeName(f.name)).join(', ')}]` : ''
-    lines.push(`--- ${new Date(p.create_at).toISOString()} ${who} (id ${p.id})${files}\n${p.message}`)
-  }
-  return lines.join('\n')
+  if (isDraft(threadId)) return `Nothing is posted in thread ${threadId} yet: your first reply opens it in the channel.`
+  return threadText(hub, threadId, limit)
 }
 
 async function downloadAttachment(hub: Hub, key: string, messageId: string): Promise<string> {
@@ -342,8 +362,18 @@ export async function handleCall(hub: Hub, key: string, tool: string, a: Args): 
       return downloadAttachment(hub, key, str(a, 'message_id')!)
     case 'fetch_thread': {
       const limit = typeof a.limit === 'number' ? a.limit : 50
-      return fetchThread(hub, readableThread(hub, key, a), limit)
+      // Any other thread, by a link or the id of a post in it: read for the person asking (explore.ts).
+      const ref = str(a, 'thread_id', false)
+      const id = ref ? (postIdOf(ref) ?? ref) : undefined
+      if (id && !ownThread(hub, key, id)) return readOtherThread(hub, key, id, limit, str(a, 'message_id', false))
+      return fetchThread(hub, readableThread(hub, key, id ? { ...a, thread_id: id } : a), limit)
     }
+    case 'read_channel':
+      return readChannel(hub, key, { channel: str(a, 'channel')!, limit: typeof a.limit === 'number' ? a.limit : undefined, before: str(a, 'before', false), messageId: str(a, 'message_id', false) })
+    case 'search_messages':
+      return searchMessages(hub, key, { terms: str(a, 'terms')!, limit: typeof a.limit === 'number' ? a.limit : undefined, messageId: str(a, 'message_id', false) })
+    case 'list_channels':
+      return listChannels(hub, key, { messageId: str(a, 'message_id', false) })
     case 'list_workspaces':
       return listWorkspacesText(hub, key)
     case 'message_workspace':

@@ -77,7 +77,8 @@ Arguments passed: `$ARGUMENTS`
   DMs, 🔐 answers (`yes abcde`, ✅/❌) and `!` commands need no mention. Pick it when
   people talk among themselves in the bot's threads and want it to stay quiet. Running
   sessions learn about it at `mmhub session restart all`. `laya`: the bot follows a thread from its first mention until the
-  router calls `unfollow` (request done) or an owner sends `!unfollow`. While followed,
+  router calls `unfollow` (request done), an owner sends `!unfollow`, or 15 posts go by
+  without one from the bot (`unfollowAfter` in config.json; 0 = never). While followed,
   a reply from the one person who shares the thread with the bot always reaches it
   (unless it @mentions someone else). With more people, the local Laya model judges
   who each reply without a mention is talking to (the bot, the people and bots in the
@@ -107,8 +108,9 @@ Arguments passed: `$ARGUMENTS`
   need a bound channel in the target workspace.
 - **`cron [<workspace>] [list | add | show|rm|pause|resume|run <id> | next "<schedule>"]`**:
   scheduled jobs. At set times the hub gives a router of the workspace an instruction:
-  each run opens a new thread (**⏰ Scheduled: <name>**) in a channel bound to the
-  workspace, or every run goes to one existing hub thread, whose router remembers
+  each run's router posts its outcome as a new post (a new thread) in a channel bound to
+  the workspace, with no post of the hub's own and nothing at all when there is nothing
+  worth posting, or every run goes to one existing hub thread, whose router remembers
   earlier runs. Without arguments: `mmhub cron list [<ws>]`. To add one, help the user
   with two things:
   - **The schedule:** `every weekday 09:00`, `every mon,thu 17:00`,

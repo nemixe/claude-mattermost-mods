@@ -80,6 +80,8 @@ export function routerPostingRules(reports: WorkerReports): string {
   return `- Post only what the person needs: answers, results, a question that needs their decision, a blocker or risk. Nothing else.
 - Don't narrate the process: no worker or task ids, queue positions, tool names, "I've passed this on", "I'll report back", or a restatement of their request. If they ask who is on it or how it is going, tell them.
 - Hand-offs are quiet: react to their message with "eyes" instead of posting. Post about a hand-off only when it changes what they should expect: it waits behind other work, it can't start, or you assumed something they should know.
+- Mattermost beyond your thread is yours to read: a link to another thread (fetch_thread with the link), a channel (read_channel), past discussion (search_messages), the channels there are (list_channels). You read for the person asking, so a channel they aren't a member of is closed to you: say so plainly rather than guess at its content.
+- Thanks, or a bare acknowledgement ("ok", "great", "makasih", "siap"), gets a reaction, not a post: react to it with "pray" and say nothing. Answer in words only when it also asks or tells you something.
 ${workers}
 - Don't mention interruptions, retries or restarts on your side (a re-delivered message): just carry on.
 - A message with kind="workspace_request" comes from a Claude session of another workspace (from_workspace), not a person, and this thread exists for it. Handle it like a colleague's request: answer yourself when reading is enough, delegate work that changes things, and reply with the outcome — your replies go back to it (people in this channel can read them too). Be complete and concrete; no small talk, no secrets (keys, tokens, passwords).
@@ -116,6 +118,7 @@ export function workerReportingRules(reports: WorkerReports): string {
 - Report a blocker you can't get past.
 - Need information or a change from another workspace (its code, data, decisions)? Ask it with \`message_workspace\` (\`list_workspaces\` shows them): its router answers, and the answer comes back to you as a new message for the same thread. For a decision only an owner can make privately, \`send_dm\` them; the reply comes back the same way. Otherwise ask through your thread as usual.
 - A task that asks for recurring work ("every morning…"): set it up with \`schedule\`, passing the message id of the owner's words the task quotes (only owners can); \`list_schedules\` and \`unschedule\` manage the workspace's jobs.
+- Other Mattermost threads and channels: fetch_thread (a link or post id), read_channel, search_messages, list_channels. You read for the person whose message your task quotes (pass its message_id): only channels they are a member of.
 - No "starting", plan or progress notes. On a task that runs for a long time, at most one short milestone.`
 }
 
@@ -124,7 +127,7 @@ function repoLines(w: Workspace): string {
 }
 
 /** How posts reach a workspace's sessions, when Laya or mention-only decides (empty otherwise). */
-function triggerNote(w: Workspace, role: 'router' | 'worker', trigger: Trigger): string {
+function triggerNote(w: Workspace, role: 'router' | 'worker', trigger: Trigger, unfollowAfter = 0): string {
   if (trigger === 'mention-only') {
     return role === 'router'
       ? `\n\nHow messages reach you (the current setting): in this workspace only messages that @mention you reach you, replies in your own threads too. DMs, answers to permission prompts and ! commands are the exceptions. So when you ask a person something, ask them to @mention you in their answer, or it won't reach you. A message may say that earlier ones in the thread didn't mention you: fetch_thread shows them when you need them.`
@@ -135,11 +138,11 @@ function triggerNote(w: Workspace, role: 'router' | 'worker', trigger: Trigger):
   const judge = trigger === 'openrouter' ? 'an AI model (through OpenRouter)' : 'Laya'
   const Judge = trigger === 'openrouter' ? 'The model' : 'Laya'
   return role === 'router'
-    ? `\n\nHow messages reach you (the current setting): this workspace uses ${judge}. You follow your thread from the first @mention. While you follow it, a message without an @mention reaches you only when ${Judge} judges it meant for you, by the rules in ${file}. When the thread's request is done (you posted the result, and nothing waits on the person or a worker), call unfollow: from then on only @mentions reach you, and a mention follows the thread again. Don't unfollow while you wait for an answer. If a person says you answered something that wasn't for you, or missed something that was, delegate a worker to adjust the rules with trigger_rules (one short rule), and carry on. A message may say that earlier ones were judged not for you: fetch_thread shows them when you need them.`
+    ? `\n\nHow messages reach you (the current setting): this workspace uses ${judge}. You follow your thread from the first @mention. While you follow it, a message without an @mention reaches you only when ${Judge} judges it meant for you, by the rules in ${file}. When the thread's request is done (you posted the result, and nothing waits on the person or a worker), call unfollow: from then on only @mentions reach you, and a mention follows the thread again. Don't unfollow while you wait for an answer.${unfollowAfter > 0 ? ` The hub also stops following by itself once ${unfollowAfter} messages go by without a post from you; you'll hear how many you missed when a mention brings you back.` : ''} If a person says you answered something that wasn't for you, or missed something that was, delegate a worker to adjust the rules with trigger_rules (one short rule), and carry on. A message may say that earlier ones were judged not for you: fetch_thread shows them when you need them.`
     : `\n\nWhen the bot answers (the current setting): this workspace uses ${judge}, which judges each message without an @mention by the rules in ${file}. When you learn when the bot should or shouldn't answer (a person says so, or a task asks for it), update them with trigger_rules: read them first (no content), then save the whole file with your change. Short, specific rules, one per line (each is checked on its own, so vague ones do nothing); keep the others.`
 }
 
-export function routerContext(w: Workspace, o: { threadId: string; permalink: string; workers: WorkerRow[]; persona: string; reports: WorkerReports; trigger?: Trigger }): string {
+export function routerContext(w: Workspace, o: { threadId: string; permalink: string; workers: WorkerRow[]; persona: string; reports: WorkerReports; trigger?: Trigger; unfollowAfter?: number }): string {
   const workers = o.workers.length ? o.workers.map(x => `- ${x.key} "${x.title}": ${x.summary || '(no summary)'}`).join('\n') : '- (none yet)'
   return `mmhub context (refreshed at every start/resume):
 Workspace "${w.name}" at ${w.dir}${w.description ? ` — ${w.description}` : ''}
@@ -154,7 +157,7 @@ What you post in the thread (the current rules; they replace anything earlier ab
 ${routerPostingRules(o.reports)}
 
 Your persona — how you work with people in this thread (the current setting; it replaces any earlier one):
-${o.persona}${triggerNote(w, 'router', o.trigger ?? 'mention')}`
+${o.persona}${triggerNote(w, 'router', o.trigger ?? 'mention', o.unfollowAfter)}`
 }
 
 export function workerContext(w: Workspace, o: { worker: WorkerRow; reports: WorkerReports; trigger?: Trigger }): string {

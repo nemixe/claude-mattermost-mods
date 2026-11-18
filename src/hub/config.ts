@@ -82,6 +82,12 @@ export type HubConfig = {
    * mention until its router unfollows; meanwhile Laya judges replies without one).
    */
   trigger: Trigger
+  /**
+   * Triggers "laya" and "openrouter": the hub stops following a thread by itself once
+   * this many posts went by since the bot's last post there (0: never). A mention
+   * follows it again.
+   */
+  unfollowAfter: number
   /** Where Laya runs and how it decides (laya.ts DEFAULT_LAYA). */
   laya: LayaConfig
   /** The OpenRouter judge for trigger "openrouter" (openrouter.ts DEFAULT_OPENROUTER); its key is OPENROUTER_API_KEY in .env. */
@@ -105,6 +111,7 @@ export const DEFAULT_CONFIG: HubConfig = {
   disablePlugins: [],
   tmuxSocket: 'mmhub',
   trigger: 'mention',
+  unfollowAfter: 15,
   laya: DEFAULT_LAYA,
   openrouter: DEFAULT_OPENROUTER,
 }
@@ -119,6 +126,7 @@ export function loadConfig(file: string): HubConfig {
     workerReports: raw.workerReports === 'thread' ? 'thread' : 'router',
     providers: Array.isArray(raw.providers) ? raw.providers.filter((n): n is string => typeof n === 'string') : undefined,
     trigger: isTrigger(raw.trigger) ? raw.trigger : 'mention',
+    unfollowAfter: typeof raw.unfollowAfter === 'number' && raw.unfollowAfter >= 0 ? Math.floor(raw.unfollowAfter) : DEFAULT_CONFIG.unfollowAfter,
     laya: { ...DEFAULT_LAYA, ...(raw.laya ?? {}) },
     openrouter: { ...DEFAULT_OPENROUTER, ...(raw.openrouter ?? {}) },
   }

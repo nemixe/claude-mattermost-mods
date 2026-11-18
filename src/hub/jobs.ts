@@ -2,16 +2,17 @@
  * Scheduled jobs ("cron"): recurring work that runs without anyone posting.
  *
  * At each time its schedule gives (cron.ts), a job hands its text to a router
- * of its workspace, like a person's message: each run opens a new thread in
- * the job's channel ("⏰ Scheduled: <name>") with a router of its own, or goes
- * to the router of an existing hub thread. Nothing waits on a live session:
- * the message goes through the router's inbox, which starts or resumes it
- * within the hub's session caps (a full pool means it waits its turn).
+ * of its workspace, like a person's message: each run gets a router of its own
+ * for a new thread in the job's channel, or goes to the router of an existing
+ * hub thread. Nothing waits on a live session: the message goes through the
+ * router's inbox, which starts or resumes it within the hub's session caps (a
+ * full pool means it waits its turn).
  *
- * What people read comes from the sessions: the schedule and unschedule tools
- * post nothing (the session confirms in its own words), and a run in an
- * existing thread posts nothing before the router's reply. The one post of the
- * hub's own is the first message of a run's new thread, which opens it.
+ * What people read comes only from the sessions; the hub posts nothing of its
+ * own. The schedule and unschedule tools post nothing (the session confirms in
+ * its own words). A run's new thread starts as a draft (store.ts): the router's
+ * first reply is a new post in the channel, which opens the thread, and a run
+ * with nothing worth posting posts nothing at all.
  *
  * Who: owners only. A session (the schedule tool) must cite an owner's message
  * in its thread asking for the job; `!cron` is an owner command; the CLI runs
@@ -26,13 +27,13 @@
  * or being worked on is skipped too, so runs never pile up.
  */
 
-import { errMsg, fmtAge, log } from '../shared/util'
+import { errMsg, fmtAge, log, shortId } from '../shared/util'
 import { fmtLocal, hubTimezone, minGapMinutes, nextRun, parseCron, parseSchedule, ScheduleError, validTimezone } from './cron'
 import type { Hub } from './hub'
 import { requestChannel } from './links'
 import { isOwner } from './access'
 import { isBotPost, type MMPost } from './mattermost'
-import type { JobRow, JobRunRow, ThreadRow } from './store'
+import { DRAFT, type JobRow, type JobRunRow, type ThreadRow } from './store'
 import { ToolError } from './tools'
 import { loadBindings } from './workspaces'
 
@@ -231,7 +232,7 @@ export async function runNow(hub: Hub, id: number, by: string, workspace?: strin
   return { job: hub.store.job(id)!, run: hub.store.runs(id, 1)[0] }
 }
 
-/** Post (or pick) the run's thread and hand the instruction to its router. */
+/** Pick the run's thread (a draft for a new one: nothing is posted) and hand the instruction to its router. */
 async function start(hub: Hub, job: JobRow, runId: number, slot: number, when: string): Promise<void> {
   const failed = (why: string) => {
     hub.store.patchRun(runId, { status: 'failed', note: why })
@@ -241,29 +242,21 @@ async function start(hub: Hub, job: JobRow, runId: number, slot: number, when: s
   const w = hub.ws(job.workspace)
   if (!w) return failed(`workspace ${job.workspace} is gone`)
   let thread: ThreadRow
-  let messageId: string | undefined
   if (job.threadId) {
     const t = hub.store.thread(job.threadId)
     if (!t) return failed(`thread ${job.threadId} is gone`)
-    // No notice of the hub's own: the router's reply is the run's only post.
     thread = t
   } else {
     const ch = job.channelId!
     if (loadBindings(hub.p.bindings)[ch] !== w.name) return failed(`channel ${ch} is no longer bound to workspace ${w.name}`)
-    let root: MMPost
-    try {
-      root = await hub.mm.createPost({ channel_id: ch, message: rootText(job), props: { mmhub_job: String(job.id) } })
-    } catch (err) {
-      return failed(`couldn't post in channel ${ch}: ${errMsg(err)}`)
-    }
-    hub.createRouter({ threadId: root.id, channelId: ch, workspace: w, label: `⏰ ${job.name}`.slice(0, 60) })
-    thread = hub.store.thread(root.id)!
-    messageId = root.id
+    // Nothing posted: the router's first reply opens the thread (tools.ts postAs).
+    const id = `${DRAFT}${shortId(12)}`
+    hub.createRouter({ threadId: id, channelId: ch, workspace: w, label: `⏰ ${job.name}`.slice(0, 60) })
+    thread = hub.store.thread(id)!
   }
   const meta: Record<string, string> = {
     chat_id: thread.channelId,
     thread_id: thread.id,
-    ...(messageId ? { message_id: messageId } : {}),
     user: `job:${job.id}`,
     kind: 'scheduled',
     job_id: String(job.id),
@@ -277,16 +270,12 @@ async function start(hub: Hub, job: JobRow, runId: number, slot: number, when: s
   log('cron', `job #${job.id} "${job.name}" → thread ${thread.id} (router ${thread.routerKey}; ${when})`)
 }
 
-function rootText(job: JobRow): string {
-  // The instruction is shown, not said: its @mentions (an "@channel" in it, say) mustn't notify anyone at every run.
-  const quoted = job.text.replace(/@(?=[\w.-])/g, '@\u200b').split('\n').map(l => `> ${l}`).join('\n')
-  return `⏰ **Scheduled: ${job.name}** · job #${job.id}, ${job.schedule} (${job.tz})\n${quoted}`
-}
-
 function routerText(job: JobRow, when: string): string {
-  const posted = job.threadId ? ' The hub posts nothing for this run: your reply is all people see.' : ''
+  const where = job.threadId
+    ? 'Post the outcome in this thread with reply: the hub posts nothing for this run, so your reply is all people see.'
+    : "Nothing is posted yet: your first reply is a new post in the channel, which opens this run's thread, so make it stand on its own (people never see this instruction). If there is nothing worth posting, post nothing."
   return [
-    `[Scheduled job #${job.id} "${job.name}" (${job.schedule}, ${job.tz}; ${when}), set up by ${job.createdBy}. Not a person: the hub runs this on its schedule, and nobody may be watching. Do what it asks — answer yourself when reading is enough, delegate work that changes things — and post the outcome in this thread with reply. Keep it short, and say plainly when something needs a person.${posted}]`,
+    `[Scheduled job #${job.id} "${job.name}" (${job.schedule}, ${job.tz}; ${when}), set up by ${job.createdBy}. Not a person: the hub runs this on its schedule, and nobody may be watching. Do what it asks — answer yourself when reading is enough, delegate work that changes things. ${where} Keep it short, and say plainly when something needs a person.]`,
     '',
     job.text,
   ].join('\n')
@@ -369,7 +358,7 @@ export async function scheduleTool(hub: Hub, key: string, a: { schedule: string;
       createdBy: who, origin: `thread ${thread.id}`,
     })
     // The session confirms it in its own words: the hub posts nothing here.
-    return `scheduled job #${job.id} "${job.name}" set up for ${who}: ${summary(hub, job)}. Each run reaches ${job.threadId ? "this thread's router" : 'a new router in a new thread'} as a kind="scheduled" message. Nothing was posted: confirm it to the person yourself with reply, in their language — when it runs next, where, and that an owner can remove it with \`!cron rm ${job.id}\` or pause it with \`!cron pause ${job.id}\`.`
+    return `scheduled job #${job.id} "${job.name}" set up for ${who}: ${summary(hub, job)}. Each run reaches ${job.threadId ? "this thread's router" : 'a new router in a new thread'} as a kind="scheduled" message. Nothing was posted: confirm it to the person yourself with reply, in their language: when it runs next and where. Don't tell them how to remove or pause it unless they ask; then: \`!cron rm ${job.id}\` removes it, \`!cron pause ${job.id}\` pauses it.`
   })
 }
 

@@ -72,8 +72,21 @@ the `/mm` panel. The CLI is `bun ~/claude-mattermost-mods/bin/mmhub` (alias it t
   the worker is done, the router posts the outcome (what changed, where, how to use it)
   and keeps the details for when you ask.
 - Replies in the thread need no mention. Follow-ups reach the same worker.
-- While a router or worker is working for a thread, the bot shows as **typing…** there
-  (not while it waits for a 🔐 answer or an API-error retry).
+- `@claude recap the issues reported in <link to a thread> as a table`, or a question
+  about a channel or past discussion → the bot reads Mattermost for you: a thread from
+  its link (or any post's), a channel's latest posts, a search, the channels it is in.
+  It reads for whoever asked: only channels that person is a member of, besides its own
+  thread's and its workspace's bound channels, so nobody can use it to look into a
+  channel they aren't in. What it reads it may quote in the thread you asked in, as if
+  you had pasted it there. The bot itself can read public channels of its teams, but
+  private channels, DMs and group messages only when it is a member, and search covers
+  only channels it is a member of.
+- Thanks, or a bare "ok", gets a 🙏 reaction rather than a reply. Which replies reach the
+  bot at all depends on the workspace's trigger: with `laya` or `openrouter`, thanks
+  reach it only right after its own post.
+- While a router or worker is working for a thread, the bot shows as **typing…** there:
+  only while the session runs, not while it starts up, while Laya or OpenRouter judges a
+  reply, or while it waits for a 🔐 answer or an API-error retry.
 - Worker permission prompts appear as 🔐 posts: owners reply `yes abcde` / `no abcde`
   or react ✅ / ❌. Pre-approve common commands in the workspace's `.claude/settings.json`.
 - `@claude every weekday at 9, check the alerts dashboard and post anything red` (an
@@ -139,7 +152,12 @@ on, the bot **follows** each thread it is @mentioned in:
   on the person or a worker), the router calls `unfollow`. The hub refuses that while a
   worker still has work for the thread. From then on, replies without a mention are
   ignored, without asking Laya.
-- **A new mention follows the thread again.** Owners can also switch by hand with
+- **Quiet → unfollowed.** The hub also stops following a thread by itself once
+  `unfollowAfter` (15) posts went by since the bot's last post there, counting the new
+  one: people have moved on. That post isn't judged, and later ones without a mention
+  are ignored. `0` turns this off. It applies to `openrouter` too.
+- **A new mention follows the thread again.** The router hears how many messages it
+  missed while it wasn't following, and why it stopped. Owners can also switch by hand with
   `!unfollow` and `!follow` in the thread.
 
 Posts outside the bot's threads still need a mention. DMs are never judged: every DM from
@@ -318,8 +336,9 @@ workspace, where its runs go, and the instruction each run gets. Jobs live in `h
 - Ask the bot in a thread: *"every weekday at 9, check the alerts dashboard and post
   anything red"*. The router calls `schedule` with the id of the owner's message (a
   worker can too, from the owner's words its task quotes). The hub checks that the
-  message is in that session's thread and that its author is an owner, then posts a ⏰
-  confirmation in the thread.
+  message is in that session's thread and that its author is an owner, and the session
+  confirms it in the thread: when it runs next and where. It says how to remove or pause
+  the job only when asked.
 - In chat: `!cron add every weekday 09:00 | check the alerts dashboard and post anything red`
   (runs open threads in this channel).
 - In a terminal: `mmhub cron add <ws> "every weekday 09:00" Check the alerts…`
@@ -333,11 +352,13 @@ machine's. The zone is stored with the job, so moving the hub doesn't shift it. 
 at least 15 minutes apart, a workspace has at most 20 jobs, and an instruction is at most
 4000 characters. `mmhub cron next "<schedule>"` shows the times a schedule gives.
 
-**A run** posts **⏰ Scheduled: <name>** (with the instruction) in the job's channel: a
-channel bound to its workspace, by default the one it was set up in. That thread gets a
-router of its own, which receives the instruction as a `kind="scheduled"` message. It
-handles it like a person's request (answers itself, or delegates to workers) and posts
-the outcome there, where people can reply as usual. A job can instead send every run to
+**A run** gets a router of its own, which receives the instruction as a `kind="scheduled"`
+message and handles it like a person's request (answers itself, or delegates to
+workers). The hub posts nothing for it: the router's first reply is a new post in the
+job's channel (a channel bound to its workspace, by default the one it was set up in),
+and that post opens the run's thread, where people can reply as usual. People never see
+the instruction, and a run with nothing worth posting ("post anything red", and nothing
+is) posts nothing at all. A job can instead send every run to
 one existing hub thread (the `in_this_thread` option, `--thread`). That thread's router
 then remembers earlier runs ("compare with yesterday"). No session has to be running: the
 message goes through the router's inbox, which starts or resumes it like any message,
@@ -442,7 +463,9 @@ to the router; `thread`: they post in the thread), `idleMinutes` (`{router:30, w
 `announceClose`, `busyWatchdogMinutes` (30), `routerAutocompact`, `claudeBin`, `bunBin`,
 `gitBin`, `path`, `tmuxSocket` (`mmhub`), `providers` (`["default"]`),
 `providerCooldownMinutes` (`{auth:60, quota:60, rate_limit:10, errors:15, channels:360}`),
-`trigger` (`mention`; or `laya`, see [above](#answering-without-a-mention-laya)), `laya`
+`trigger` (`mention`; or `mention-only`, `laya`, `openrouter`, see [above](#answering-without-a-mention-laya)),
+`unfollowAfter` (15: with `laya` or `openrouter`, stop following a thread after this many
+posts without one from the bot; 0 = never), `openrouter` ([above](#a-hosted-judge-openrouter)), `laya`
 (`{url: "http://127.0.0.1:11434", model: "laya", threshold: 0.45, ruleThreshold: 0.85, kindThreshold: 0.7, timeoutMs: 5000, messages: 10}`).
 A workspace's `workspace.json` can override models, permission mode, idle minutes and
 `providers` and `trigger`, and sets which workspaces may ask it (`acceptFrom`,

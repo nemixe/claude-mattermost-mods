@@ -35,7 +35,7 @@ import {
 import { claudeArgs, tmuxName, wrapArgv, writeProviderEnv, writeSessionFiles } from './spawn'
 import { shepherd, waitForCalm } from './shepherd'
 import { buildSnapshot, StatusWriter } from './status'
-import { Store, type MessageRow, type SessionRow, type TaskRow, type ThreadRow, type WorkerRow } from './store'
+import { isDraft, Store, type MessageRow, type SessionRow, type TaskRow, type ThreadRow, type WorkerRow } from './store'
 import { Ticker } from './ticker'
 import type { Tmux } from './tmux'
 import { effective, ensureTemplate, externalRepoPaths, listWorkspaces, loadBindings, loadWorkspace, workerDir, type Workspace } from './workspaces'
@@ -189,7 +189,8 @@ export class Hub {
   }
 
   permalink(postId: string): string {
-    return this.mm.permalink(postId)
+    const id = this.store.threadId(postId)
+    return isDraft(id) ? '(not posted yet)' : this.mm.permalink(id)
   }
 
   idleMinutesFor(s: { role: Role; workspace: string }): number {
@@ -624,7 +625,7 @@ export class Hub {
     const l = this.liveOf(key)
     const name = tmuxName(key)
     const since = l.spawnedAt
-    // No "resuming…" post: keepTyping shows "typing…" in the thread meanwhile.
+    // No "resuming…" post: "typing…" shows once the session runs (keepTyping).
     let outcome = await shepherd(this.tmux, name, () => l.helloAt >= since, {
       onDialog: d => log('lifecycle', `${key}: answered startup dialog "${d.name}"`),
       problem: startupProblem,
@@ -698,7 +699,7 @@ export class Hub {
     l.conn!.send({ t: 'inbound', content: m.content, meta: m.meta })
     l.lastDeliveredAt = Date.now()
     this.patch(key, { status: 'busy', busySince: this.store.session(key)?.busySince ?? Date.now(), lastActiveAt: Date.now() })
-    if (key.startsWith('r-') && m.meta.chat_id && m.meta.thread_id) this.mm.typing(m.meta.chat_id, m.meta.thread_id)
+    if (key.startsWith('r-') && m.meta.chat_id && m.meta.thread_id && !isDraft(m.meta.thread_id)) this.mm.typing(m.meta.chat_id, m.meta.thread_id)
   }
 
   /**
@@ -973,6 +974,7 @@ export class Hub {
         persona: routerPersona(this.cfg, w).text, reports: this.cfg.workerReports,
         // In a DM every message reaches the router, so it hears nothing about Laya or unfollow.
         trigger: t && inDM(this, t.id) ? 'mention' : effective(this.cfg, w).trigger,
+        unfollowAfter: this.cfg.unfollowAfter,
       })
     }
     const worker = this.store.worker(key)
@@ -1422,8 +1424,9 @@ export class Hub {
   /**
    * Keep "typing…" up in every thread a session is working for: a busy router in its
    * thread, a busy worker in the thread of its task. Mattermost drops the indicator
-   * after a few seconds, so this runs every 3 s. Not while a session waits on a 🔐
-   * prompt or for an API-error retry — then it's waiting on someone, not working.
+   * after a few seconds, so this runs every 3 s. Only while a session runs a turn:
+   * not while it starts or resumes, nor while Laya or OpenRouter judges a reply (no
+   * session runs then), nor while it waits on a 🔐 prompt or an API-error retry.
    */
   keepTyping(): void {
     if (!this.mm.connected) return
@@ -1431,11 +1434,10 @@ export class Hub {
     for (const s of this.store.sessions()) {
       const l = this.live.get(s.key)
       if (!l || this.desk.count(s.key) > 0 || this.held(s.key)) continue
-      const working = s.status === 'busy' && l.ready && !!l.conn
-      const waking = (s.status === 'starting' || s.status === 'resuming') && this.queued(s.key) > 0
-      if (!working && !waking) continue
-      const t = working ? this.activeThreadOf(s.key) : this.threadsNeeding(s.key)[0]
-      if (!t || done.has(t.id)) continue
+      if (s.status !== 'busy' || !l.ready || !l.conn) continue
+      const t = this.activeThreadOf(s.key)
+      // A draft thread (a scheduled run's) has no post yet to show it under.
+      if (!t || done.has(t.id) || isDraft(t.id)) continue
       done.add(t.id)
       this.mm.typing(t.channelId, t.id)
     }

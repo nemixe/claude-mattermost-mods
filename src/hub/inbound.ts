@@ -121,7 +121,7 @@ export function decideInbound(i: InboundInput): InboundAction {
     if (!judged(i.trigger) || isDM) return message
     // Laya: a mention follows the thread; while it is followed, Laya judges the rest.
     if (mentioned) return { ...message, follow: true }
-    if (i.followed === false) return { kind: 'ignore', reason: 'thread not followed (a mention follows it again)' }
+    if (i.followed === false) return { kind: 'ignore', reason: 'thread not followed (a mention follows it again)', passOver: threadId }
     return { kind: 'classify', threadId, then: message }
   }
 

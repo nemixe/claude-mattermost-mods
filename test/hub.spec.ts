@@ -258,14 +258,14 @@ describe('interrupted work resumes', () => {
 })
 
 describe('typing indicator', () => {
-  test('shown in the thread a busy session works for; not while it waits on a person or a retry', async () => {
+  test('shown in the thread a session works for while it runs; not while it starts, nor while it waits on a person or a retry', async () => {
     const { hub, tmux, w, typing } = setup()
     const { key } = worker(hub, w)
     hub.keepTyping()
     expect(typing).toEqual([]) // not started yet
     await hub.enqueue(() => hub.ensureStarted(key))
     hub.keepTyping()
-    expect(typing).toEqual(['C1/T1']) // starting with a task waiting: shown instead of a "resuming…" post
+    expect(typing).toEqual([]) // starting, with a task waiting: not running yet
     await connect(hub, tmux, key, 1) // the task goes in: busy
     typing.length = 0
     hub.keepTyping()
@@ -400,6 +400,7 @@ describe('worker reports', () => {
     const mcp = JSON.parse(readFileSync(join(hub.p.sessions, key, 'mcp.json'), 'utf8'))
     expect(mcp.mcpServers.mmhub.env.MMHUB_REPORTS).toBe('router')
     expect(hub.hookContext(rkey)).toContain('kind="worker_report"')
+    expect(hub.hookContext(rkey)).toContain('react to it with "pray" and say nothing')
     expect(hub.hookContext(key)).toContain("goes to that thread's router")
   }, T)
 
@@ -563,7 +564,7 @@ describe('cross-workspace requests and DMs', () => {
   }
 
   test("a worker asks another workspace; that workspace's router answers in a visible thread and the answer comes back", async () => {
-    const { hub, tmux, posts, bee, key, wb } = await scene()
+    const { hub, tmux, posts, others, bee, key, wb } = await scene()
     const res = await handleCall(hub, key, 'message_workspace', { workspace: 'bee', text: 'What is the staging DB host?' })
     expect(res).toContain('request_id p1')
     expect(posts[0]).toMatchObject({ id: 'p1', channel_id: 'CB' })
@@ -588,9 +589,10 @@ describe('cross-workspace requests and DMs', () => {
     expect(wb.got[1]!.content).toContain('staging-db.internal:5432')
     expect(wb.got[1]!.meta).toMatchObject({ thread_id: 'T1' })
 
-    // The asker reads the request thread; the router can't read threads not its own.
+    // The asker reads the request thread. The other router reads threads not its own only for a person, and a workspace's request has none.
     expect(await handleCall(hub, key, 'fetch_thread', { thread_id: 'p1' })).toContain('staging-db.internal:5432')
-    await expect(handleCall(hub, t.routerKey, 'fetch_thread', { thread_id: 'T1' })).rejects.toThrow('not yours to read')
+    others.push({ id: 'T1', root_id: '', user_id: 'U1', channel_id: 'C1', message: 'demo work', create_at: 0 } as MMPost)
+    await expect(handleCall(hub, t.routerKey, 'fetch_thread', { thread_id: 'T1' })).rejects.toThrow('no person to read for')
 
     // A follow-up goes to the same router, in the same thread.
     const n = rb.got.length
@@ -750,6 +752,67 @@ describe('trigger openrouter', () => {
       down = true
       await send('M3', 'and the tests?')
       await until('M3 reaches the router', () => rb.got.length === 2)
+    } finally {
+      or.stop(true)
+    }
+  }, T)
+})
+
+describe('unfollowing a quiet thread', () => {
+  test('after unfollowAfter posts without one from the bot, the hub stops following; a mention brings the bot back and says what it missed', async () => {
+    let judged = 0
+    const or = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        if (new URL(req.url).pathname.includes('/models/')) return Response.json({ data: { architecture: { output_modalities: ['decisions'] }, endpoints: [{}] } })
+        judged++
+        return Response.json({ answers: { who: { type: 'choice', probabilities: { hubbot: 0.1, nobody: 0.9 } } } })
+      },
+    })
+    try {
+      const { hub, tmux, w, p, others } = setup({ unfollowAfter: 3, openrouter: { url: `http://127.0.0.1:${or.port}/api/v1`, timeoutMs: 2000 } }, dir => {
+        writeFileSync(join(dir, 'access.json'), JSON.stringify({ dmPolicy: 'allowlist', allowFrom: ['U1'], channels: {}, pending: {} }))
+        writeFileSync(join(dir, '.env'), 'MATTERMOST_URL=http://mm\nOPENROUTER_API_KEY=sk-or-v1-test\n')
+      })
+      hub.bot = { id: 'BOT', username: 'hubbot' }
+      setWorkspaceTrigger(loadConfig(p.config), 'demo', 'openrouter')
+      bindChannel(p.bindings, 'C1', 'demo')
+      const rkey = hub.createRouter({ threadId: 'T3', channelId: 'C1', workspace: w, label: 'thread three' })
+      // The bot answered, then bob posted.
+      others.push(
+        { id: 'A0', root_id: 'T3', user_id: 'BOT', channel_id: 'C1', message: 'Done: the build is green.', create_at: 1 } as MMPost,
+        { id: 'B1', root_id: 'T3', user_id: 'U2', channel_id: 'C1', message: 'nice', create_at: 2 } as MMPost,
+      )
+      let at = 10
+      const send = async (id: string, message: string) => {
+        const post = { id, root_id: 'T3', user_id: 'U1', channel_id: 'C1', message, create_at: at++ } as MMPost
+        others.push(post)
+        await hub.enqueue(() => hub.onPosted(post, 'O'))
+      }
+
+      // Two posts since the bot's: judged (not for it).
+      await send('M1', 'lunch?')
+      await until('M1 judged', () => hub.store.get('skipped:T3') === '1')
+      expect(judged).toBe(1)
+      // The third: no judge, the hub stops following.
+      await send('M2', 'sure, at noon')
+      await until('unfollowed', () => hub.store.get('follow:T3') === 'off')
+      expect(judged).toBe(1)
+      expect(hub.store.get('skipped:T3')).toBe('2')
+      // Not followed: not judged, but counted.
+      await send('M3', 'see you there')
+      await hub.enqueue(() => undefined)
+      expect(judged).toBe(1)
+      expect(hub.store.get('skipped:T3')).toBe('3')
+      expect(tmux.launches.length).toBe(0)
+
+      // A mention follows it again; the router hears what it missed and why.
+      await send('M4', '@hubbot what did I miss?')
+      const rb = await connect(hub, tmux, rkey, 1)
+      await until('M4 reaches the router', () => rb.got.length === 1)
+      expect(rb.got[0]!.content).toContain("3 earlier message(s) in this thread didn't reach you: 3 messages went by without a post from you, so the hub stopped following this thread, and they didn't @mention you. You follow it again now.")
+      expect(hub.store.get('follow:T3')).toBeUndefined()
+      expect(hub.hookContext(rkey)).toContain('The hub also stops following by itself once 3 messages go by without a post from you')
     } finally {
       or.stop(true)
     }
@@ -971,6 +1034,87 @@ describe('Laya decides what reaches the bot', () => {
   }, T)
 })
 
+describe('reading Mattermost beyond the thread', () => {
+  test('any thread by link, a channel, a search, the channel list: only what the person asking can read', async () => {
+    const { hub, p, w, others } = setup({}, dir => {
+      writeFileSync(join(dir, 'access.json'), JSON.stringify({ dmPolicy: 'allowlist', allowFrom: ['U1'], channels: {}, pending: {} }))
+    })
+    hub.bot = { id: 'BOT', username: 'claude' }
+    bindChannel(p.bindings, 'C1', 'demo')
+    const rkey = hub.createRouter({ threadId: 'T2', channelId: 'C1', workspace: w, label: 'recap' })
+    const X1 = 'xone' + 'a'.repeat(22)
+    const X2 = 'xtwo' + 'a'.repeat(22)
+    const post = (id: string, root: string, user: string, channel: string, message: string, at: number) =>
+      ({ id, root_id: root, user_id: user, channel_id: channel, message, create_at: at, props: {} }) as MMPost
+    others.push(
+      post('M1', 'T2', 'U1', 'C1', `@claude recap the issues in https://mm.example.com/team/pl/${X1} as a table`, 1),
+      post('M2', 'T2', 'U2', 'C1', 'me too', 2),
+      post('M3', 'T2', 'BOT', 'C1', 'On it.', 3),
+      post(X1, '', 'U3', 'C9', '[Thread] payroll issues', 4),
+      post(X2, X1, 'U2', 'C9', 'Overtime is rounded wrong', 5),
+    )
+    const chans: Record<string, { name: string; display_name?: string; type?: string }> = {
+      C1: { name: 'ops' }, C8: { name: 'secret', type: 'P' }, C9: { name: 'payroll-module', display_name: 'Payroll Module' },
+    }
+    const chan = (id: string) => ({ id, type: chans[id]?.type ?? 'O', name: chans[id]?.name ?? id, display_name: chans[id]?.display_name ?? chans[id]?.name ?? id, team_id: 'TM' })
+    const members: Record<string, string[]> = { C9: ['U1'], C8: ['U2'] }
+    const secret = post('S1', '', 'U2', 'C8', 'Overtime secret', 6)
+    Object.assign(hub.mm, {
+      channel: async (id: string) => chan(id),
+      isMember: async (c: string, u: string) => (members[c] ?? []).includes(u),
+      myTeams: async () => [{ id: 'TM', name: 'team', display_name: 'Team' }],
+      myChannels: async () => Object.keys(chans).map(chan),
+      channelByName: async (_t: string, name: string) => Object.keys(chans).map(chan).find(c => c.name === name),
+      channelPosts: async (c: string, n: number) => {
+        const ps = others.filter(o => o.channel_id === c).sort((a, b) => b.create_at - a.create_at).slice(0, n)
+        return { order: ps.map(x => x.id), posts: Object.fromEntries(ps.map(x => [x.id, x])) }
+      },
+      searchPosts: async () => ({ order: [X2, 'S1'], posts: { [X2]: others.find(o => o.id === X2)!, S1: secret } }),
+    })
+    // Alice (U1) wrote to the router last: it reads for her.
+    hub.store.insertMessage({ sessionKey: rkey, content: 'recap', meta: { user_id: 'U1', thread_id: 'T2', chat_id: 'C1' }, state: 'delivered', createdAt: 1 })
+
+    // A thread from its link, or from the id of any post in it: alice is in its channel.
+    const thread = await handleCall(hub, rkey, 'fetch_thread', { thread_id: `https://mm.example.com/team/pl/${X1}` })
+    expect(thread).toContain(`Thread ${X1} in ~payroll-module (Payroll Module)`)
+    expect(thread).toContain('[Thread] payroll issues')
+    expect(thread).toContain('Overtime is rounded wrong')
+    expect(await handleCall(hub, rkey, 'fetch_thread', { thread_id: X2 })).toContain(`Thread ${X1} in ~payroll-module`)
+    // Its own thread, as before.
+    expect(await handleCall(hub, rkey, 'fetch_thread', {})).toContain('Thread T2')
+    // Read for bob (not in that channel), or for the bot itself: no.
+    await expect(handleCall(hub, rkey, 'fetch_thread', { thread_id: X1, message_id: 'M2' })).rejects.toThrow('is not a member of that channel')
+    await expect(handleCall(hub, rkey, 'fetch_thread', { thread_id: X1, message_id: 'M3' })).rejects.toThrow("is not a person's")
+
+    // A channel by ~name, display name or link; one alice isn't in stays closed.
+    const ch = await handleCall(hub, rkey, 'read_channel', { channel: '~payroll-module' })
+    expect(ch).toContain('~payroll-module (Payroll Module): 2 latest post(s), oldest first')
+    expect(ch).toContain(`reply in thread ${X1}`)
+    expect(await handleCall(hub, rkey, 'read_channel', { channel: 'payroll module' })).toContain('Overtime is rounded wrong')
+    expect(await handleCall(hub, rkey, 'read_channel', { channel: 'https://mm.example.com/team/channels/payroll-module' })).toContain('[Thread] payroll issues')
+    await expect(handleCall(hub, rkey, 'read_channel', { channel: '~secret' })).rejects.toThrow('~secret: @alice is not a member of that channel')
+    await expect(handleCall(hub, rkey, 'read_channel', { channel: '~nowhere' })).rejects.toThrow('no channel "~nowhere"')
+
+    // Search: results in channels alice can't read are left out, and counted.
+    const found = await handleCall(hub, rkey, 'search_messages', { terms: 'overtime' })
+    expect(found).toContain('Overtime is rounded wrong')
+    expect(found).not.toContain('Overtime secret')
+    expect(found).toContain('1 more result(s) are in channels you may not read for this person')
+
+    // The channels: its own (bound to the workspace), and those alice is in.
+    const list = await handleCall(hub, rkey, 'list_channels', {})
+    expect(list).toContain('~ops: public, workspace demo')
+    expect(list).toContain('~payroll-module (Payroll Module): public')
+    expect(list).not.toContain('secret')
+
+    // A worker with no person behind it reads only its own channels, until it names the message it acts on.
+    const wkey = hub.createWorker({ workspace: w, title: 'Ops', summary: 'ops' })
+    hub.store.patchWorker(wkey, { threads: ['T2'] })
+    await expect(handleCall(hub, wkey, 'fetch_thread', { thread_id: X1 })).rejects.toThrow('no person to read for')
+    expect(await handleCall(hub, wkey, 'fetch_thread', { thread_id: X1, message_id: 'M1' })).toContain('Overtime is rounded wrong')
+  }, T)
+})
+
 describe('scheduled jobs', () => {
   /** Workspace demo bound to C1, owner U1 (alice); a router in thread T2 where alice and bob talk. */
   function scene() {
@@ -988,7 +1132,7 @@ describe('scheduled jobs', () => {
   }
 
   test("an owner's request through a router; each run opens a new thread with its own router, never twice, never piled up", async () => {
-    const { hub, tmux, posts, rkey } = scene()
+    const { hub, tmux, posts, rkey, w, msg } = scene()
     // Owners only, at least 15 minutes apart, a message from the session's own thread.
     await expect(handleCall(hub, rkey, 'schedule', { schedule: 'every weekday 09:00', text: 'x', message_id: 'M2' })).rejects.toThrow('only a hub owner')
     await expect(handleCall(hub, rkey, 'schedule', { schedule: 'every 5m', text: 'x', message_id: 'M1' })).rejects.toThrow('at least 15 minutes apart')
@@ -1003,40 +1147,64 @@ describe('scheduled jobs', () => {
     // The hub posts nothing: the session confirms it in its own words.
     expect(posts.length).toBe(posted)
     expect(res).toContain('Nothing was posted: confirm it to the person yourself with reply')
-    expect(res).toContain('`!cron rm 1`')
+    expect(res).toContain("Don't tell them how to remove or pause it unless they ask; then: `!cron rm 1` removes it")
     const job = hub.store.job(1)!
     expect(job).toMatchObject({ workspace: 'demo', schedule: 'every weekday 09:00', cron: '0 9 * * 1-5', tz: 'Asia/Jakarta', channelId: 'C1', createdBy: '@alice', origin: 'thread T2', paused: false })
     expect(await handleCall(hub, rkey, 'list_schedules', {})).toContain('#1 Morning alerts  [demo]')
 
-    // Not due yet: nothing. Due: a new thread in C1, and its own router gets the instruction.
+    // Not due yet: nothing. Due: a router of its own for a new thread in C1 gets the instruction, and the hub posts nothing.
     const slot = job.nextAt!
     const before = posts.length
     expect(await hub.enqueue(() => runDueJobs(hub, slot - 1000))).toBe(0)
     await hub.enqueue(() => runDueJobs(hub, slot + 2000))
-    const root = posts[before]!
-    expect(root.channel_id).toBe('C1')
-    expect(root.root_id).toBeUndefined()
-    expect(root.message).toContain('⏰ **Scheduled: Morning alerts** · job #1')
-    expect(root.message).toContain('> Check the alerts dashboard; post anything red.\n> If it is down, tell @\u200bchannel.')
-    const t = hub.store.thread(root.id)!
+    expect(posts.length).toBe(before)
+    const draft = hub.store.runs(1, 1)[0]!.threadId!
+    expect(draft).toStartWith('draft-')
+    const t = hub.store.thread(draft)!
     expect(t).toMatchObject({ workspace: 'demo', channelId: 'C1' })
     const r = await connect(hub, tmux, t.routerKey, 1)
-    expect(r.got[0]!.meta).toMatchObject({ kind: 'scheduled', job_id: '1', thread_id: root.id, chat_id: 'C1', message_id: root.id })
+    expect(r.got[0]!.meta).toMatchObject({ kind: 'scheduled', job_id: '1', thread_id: draft, chat_id: 'C1' })
+    expect(r.got[0]!.meta.message_id).toBeUndefined()
     expect(r.got[0]!.content).toContain('[Scheduled job #1 "Morning alerts"')
     expect(r.got[0]!.content).toContain('Not a person')
+    expect(r.got[0]!.content).toContain('your first reply is a new post in the channel, which opens this run\'s thread')
+    expect(r.got[0]!.content).toContain('If there is nothing worth posting, post nothing.')
     expect(r.got[0]!.content).toContain('Check the alerts dashboard; post anything red.\nIf it is down, tell @channel.')
-    expect(hub.store.runs(1, 1)[0]).toMatchObject({ status: 'started', slot, threadId: root.id })
+    expect(hub.store.runs(1, 1)[0]).toMatchObject({ status: 'started', slot, threadId: draft })
+    expect(await handleCall(hub, t.routerKey, 'fetch_thread', {})).toContain('Nothing is posted in thread')
+    expect(hub.permalink(draft)).toBe('(not posted yet)')
+    const wkey = hub.createWorker({ workspace: w, title: 'Ops', summary: 'ops' })
+    hub.store.patchWorker(wkey, { threads: [draft] })
+
+    // The router's first reply is a new post in the channel: it opens the thread, which goes by its id from then on.
+    const sent = await handleCall(hub, t.routerKey, 'reply', { text: 'Two alerts are red: checkout latency and disk on db-2.' })
+    const root = posts[before]!
+    expect(root).toMatchObject({ channel_id: 'C1', message: 'Two alerts are red: checkout latency and disk on db-2.' })
+    expect(root.root_id).toBeUndefined()
+    expect(sent).toContain(root.id)
+    expect(hub.store.thread(root.id)).toMatchObject({ id: root.id, routerKey: t.routerKey, channelId: 'C1' })
+    expect(hub.store.thread(draft)!.id).toBe(root.id)
+    expect(hub.store.runs(1, 1)[0]!.threadId).toBe(root.id)
+    expect(hub.store.job(1)!.lastThread).toBe(root.id)
+    expect(hub.store.worker(wkey)!.threads).toEqual([root.id])
+    // Whoever still holds the draft's id (a worker's task) reaches the opened thread.
+    expect(await handleCall(hub, wkey, 'reply', { thread_id: draft, text: 'db-2 is at 91%' })).toContain("thread's router")
+    await handleCall(hub, t.routerKey, 'reply', { text: 'Disk on db-2 is at 91%.' })
+    expect(posts.at(-1)!.root_id).toBe(root.id)
+    // A person's reply in it reaches the same router.
+    await hub.enqueue(() => hub.onPosted(msg('P1', 'U1', 'which disk?', root.id), 'O'))
+    await until('the reply reaches the router', () => r.got.some(m => m.content.includes('which disk?')))
+    const opened = posts.length
 
     // The same time is never run twice (say the hub restarted before it moved on).
     hub.store.patchJob(1, { nextAt: slot })
     await hub.enqueue(() => runDueJobs(hub, slot + 3000))
-    expect(posts.length).toBe(before + 1)
+    expect(hub.store.runs(1, 5).filter(x => x.status === 'started').length).toBe(1)
     expect(hub.store.job(1)!.nextAt).toBeGreaterThan(slot)
 
     // The next time comes while that run is still being worked on: skipped.
     const slot2 = hub.store.job(1)!.nextAt!
     await hub.enqueue(() => runDueJobs(hub, slot2 + 1000))
-    expect(posts.length).toBe(before + 1)
     expect(hub.store.runs(1, 1)[0]).toMatchObject({ status: 'skipped', slot: slot2 })
     expect(hub.store.runs(1, 1)[0]!.note).toContain('the run before is still waiting or being worked on')
 
@@ -1045,9 +1213,9 @@ describe('scheduled jobs', () => {
     expect(hub.store.messageState(hub.store.runs(1, 2)[1]!.inboxId!)).toBe('interrupted')
     const slot3 = hub.store.job(1)!.nextAt!
     await hub.enqueue(() => runDueJobs(hub, slot3 + 1000))
-    expect(posts.length).toBe(before + 2)
-    expect(posts.at(-1)!.message).not.toContain('@channel')
-    const t2 = hub.store.thread(posts.at(-1)!.id)!
+    expect(posts.length).toBe(opened)
+    const t2 = hub.store.thread(hub.store.runs(1, 1)[0]!.threadId!)!
+    expect(t2.id).toStartWith('draft-')
     expect(t2.routerKey).not.toBe(t.routerKey)
     await connect(hub, tmux, t2.routerKey, 2)
 
@@ -1091,7 +1259,7 @@ describe('scheduled jobs', () => {
     const often = await hub.enqueue(() => addJob(hub, { workspace: 'demo', schedule: 'every 2h', text: 'Check the queue', createdBy: 'mmhub cli', origin: 'cli' }))
     const now = often.nextAt! + 4 * 3_600_000 + 10 * 60_000
     await hub.enqueue(() => runDueJobs(hub, now))
-    expect(posts.length).toBe(1)
+    expect(posts).toEqual([])
     const run = hub.store.runs(often.id, 1)[0]!
     expect(run).toMatchObject({ status: 'started', slot: often.nextAt! + 4 * 3_600_000, note: '2 earlier time(s) missed' })
     expect(hub.store.job(often.id)!.nextAt).toBe(often.nextAt! + 6 * 3_600_000)
@@ -1123,7 +1291,7 @@ describe('scheduled jobs', () => {
     expect(r.got[0]!.meta).toMatchObject({ kind: 'scheduled', job_id: '1', thread_id: 'T2' })
     expect(r.got[0]!.meta.message_id).toBeUndefined()
     expect(r.got[0]!.content).toContain('Compare with yesterday')
-    expect(r.got[0]!.content).toContain('The hub posts nothing for this run: your reply is all people see.')
+    expect(r.got[0]!.content).toContain('the hub posts nothing for this run, so your reply is all people see')
 
     // A worker sets one up from the owner's words its task quotes.
     const wkey = hub.createWorker({ workspace: w, title: 'Ops', summary: 'ops' })
@@ -1155,8 +1323,7 @@ describe('scheduled jobs', () => {
 
     const ran = await say('@claude !cron run 1')
     expect(ran).toContain('▶️ Running job #1')
-    const root = posts.find(p => p.message.startsWith('⏰ **Scheduled:'))!
-    await connect(hub, tmux, hub.store.thread(root.id)!.routerKey, 1)
+    await connect(hub, tmux, hub.store.thread(hub.store.runs(1, 1)[0]!.threadId!)!.routerKey, 1)
     expect(hub.store.runs(1, 1)[0]).toMatchObject({ kind: 'manual', status: 'started', note: 'run now by @alice' })
     expect(await say('@claude !cron show 1')).toContain('manual started')
 

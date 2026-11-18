@@ -2,7 +2,8 @@
  * hub.db — runtime state (bun:sqlite, WAL). Only the hub writes it.
  *
  *  sessions  every claude process the hub manages (router or worker), live or stopped
- *  threads   Mattermost threads the hub owns → their router session
+ *  threads   Mattermost threads the hub owns → their router session (a scheduled
+ *            run's thread is a draft until its first post opens it: openDraft)
  *  workers   worker-specific fields (title, summary, linked threads, worktrees)
  *  tasks     work handed to workers
  *  inbox     messages handed to routers (kept until the turn that read them ends,
@@ -16,6 +17,18 @@ import { Database } from 'bun:sqlite'
 import type { CloseReason, SessionStatus } from '../shared/snapshot'
 
 export type Role = 'router' | 'worker'
+
+/**
+ * A draft thread: a scheduled run's (jobs.ts), with nothing posted yet. Its first
+ * post opens it in the channel (tools.ts postAs), and from then on its id is that
+ * post's, as for any thread (openDraft). Draft ids are `draft-` and 12 random
+ * characters, so one never appears inside another.
+ */
+export const DRAFT = 'draft-'
+
+export function isDraft(threadId: string): boolean {
+  return threadId.startsWith(DRAFT)
+}
 
 export type SessionRow = {
   key: string
@@ -336,9 +349,41 @@ export class Store {
 
   // ---------------------------------------------------------------- threads
 
+  /** A thread by id; a draft's old id finds it once opened. */
   thread(id: string): ThreadRow | undefined {
-    const r = this.db.query('SELECT * FROM threads WHERE id = ?').get(id) as Raw | null
+    const r = this.db.query('SELECT * FROM threads WHERE id = ?').get(this.threadId(id)) as Raw | null
     return r ? toThread(r) : undefined
+  }
+
+  /** The id a thread goes by now: an opened draft's is its first post's. */
+  threadId(id: string): string {
+    return isDraft(id) ? (this.get(`opened:${id}`) ?? id) : id
+  }
+
+  /**
+   * A draft's first post opened it: the post's id replaces the draft's wherever the
+   * hub kept it (the thread, its posts, tasks, workers, queued messages, jobs and
+   * runs, links, per-thread keys), and the draft's id points to it for whoever
+   * still holds the old one (a worker's task, the router's memory).
+   */
+  openDraft(draft: string, rootId: string): void {
+    if (!isDraft(draft)) throw new Error(`not a draft thread: ${draft}`)
+    this.db.transaction(() => {
+      const swap = (table: string, col: string, also = '') =>
+        this.db.query(`UPDATE ${table} SET ${col} = REPLACE(${col}, ?1, ?2) WHERE instr(${col}, ?1) > 0${also}`).run(draft, rootId)
+      swap('threads', 'id')
+      swap('posts', 'thread_id')
+      swap('tasks', 'thread_id')
+      swap('workers', 'threads')
+      swap('workers', 'active_thread')
+      swap('inbox', 'meta')
+      swap('links', 'from_thread')
+      swap('jobs', 'thread_id')
+      swap('jobs', 'last_thread')
+      swap('job_runs', 'thread_id')
+      swap('kv', 'k', " AND k NOT LIKE 'opened:%'")
+      this.set(`opened:${draft}`, rootId)
+    })()
   }
 
   threadByRouter(key: string): ThreadRow | undefined {
@@ -450,6 +495,18 @@ export class Store {
     const col = state === 'delivered' ? 'delivered_at' : state === 'queued' ? null : 'ended_at'
     if (col) this.db.query(`UPDATE inbox SET state = ?, ${col} = ? WHERE id = ?`).run(state, at, id)
     else this.db.query('UPDATE inbox SET state = ? WHERE id = ?').run(state, id)
+  }
+
+  /** The person who last wrote to the session: the newest of its messages with a sender (meta user_id). */
+  latestSender(sessionKey: string): string | undefined {
+    const rows = this.db.query('SELECT meta FROM inbox WHERE session_key = ? ORDER BY id DESC LIMIT 50').all(sessionKey) as { meta: string }[]
+    for (const r of rows) {
+      try {
+        const m = JSON.parse(r.meta) as Record<string, unknown>
+        if (typeof m.user_id === 'string' && m.user_id) return m.user_id
+      } catch {}
+    }
+    return undefined
   }
 
   /** Messages not yet read to the end of a turn: interrupted ones first, then queued. */

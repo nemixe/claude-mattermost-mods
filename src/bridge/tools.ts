@@ -11,6 +11,10 @@ const obj = (properties: Record<string, unknown>, required: string[] = []) => ({
 const s = (description: string) => ({ type: 'string', description })
 const files = { type: 'array', items: { type: 'string' }, description: 'Absolute paths of files to attach (max 10, 50MB each).' }
 
+/** Reading other threads and channels (hub explore.ts). */
+const READ_FOR = 'You read for the person asking: only channels they are a member of (and your own and your workspace\'s channels), so what you read is what they could read themselves.'
+const MESSAGE_ID = 'Optional: the message of the person you read for (default: whoever last wrote to you)'
+
 const common = (role: Role): Tool[] => [
   {
     name: 'react',
@@ -29,12 +33,40 @@ const common = (role: Role): Tool[] => [
   },
   {
     name: 'fetch_thread',
-    description: role === 'router'
-      ? 'Read your thread from Mattermost (oldest first): what people and the bot posted. Use it when you lack context (e.g. after resumed="fresh"). thread_id: a request or DM thread you opened instead.'
-      : 'Read one of your linked threads from Mattermost (oldest first), or a request or DM thread you opened.',
-    inputSchema: role === 'router'
-      ? obj({ thread_id: s('Optional: a request_id or DM thread_id you opened (default: your thread)'), limit: { type: 'number', description: 'Last N posts (default 50, max 200)' } })
-      : obj({ thread_id: s('Thread id'), limit: { type: 'number', description: 'Last N posts (default 50, max 200)' } }, ['thread_id']),
+    description: (role === 'router'
+      ? 'Read a thread from Mattermost (oldest first). Default: your own thread; use it when you lack context (e.g. after resumed="fresh"). '
+      : 'Read a thread from Mattermost (oldest first): one of your linked threads, or any other. ')
+      + 'thread_id can be any other thread too: a request or DM thread you opened, a permalink someone shared (…/pl/<id>), or the id of any post in it (from read_channel or search_messages). '
+      + READ_FOR,
+    inputSchema: obj({
+      thread_id: s(role === 'router' ? 'Optional: a thread link or post id (default: your thread)' : 'A thread id, link, or the id of a post in it'),
+      limit: { type: 'number', description: 'Last N posts (default 50, max 200)' },
+      message_id: s(MESSAGE_ID),
+    }, role === 'router' ? [] : ['thread_id']),
+  },
+  {
+    name: 'read_channel',
+    description: 'Read a Mattermost channel\'s latest posts (oldest first; replies are marked with their thread). channel: a link (…/channels/<name>), ~name, its display name, or its id. Page back with before. ' + READ_FOR,
+    inputSchema: obj({
+      channel: s('The channel: link, ~name, display name or id'),
+      limit: { type: 'number', description: 'Latest N posts (default 50, max 200)' },
+      before: s('Optional: only posts older than this post (id or link)'),
+      message_id: s(MESSAGE_ID),
+    }, ['channel']),
+  },
+  {
+    name: 'search_messages',
+    description: 'Search Mattermost messages in the channels the bot is in, with Mattermost\'s syntax: words, "a phrase", from:username, in:channel-name, after:YYYY-MM-DD, before:YYYY-MM-DD. Results in channels the person may not read are left out. ' + READ_FOR,
+    inputSchema: obj({
+      terms: s('What to search for'),
+      limit: { type: 'number', description: 'At most N results (default 20, max 100)' },
+      message_id: s(MESSAGE_ID),
+    }, ['terms']),
+  },
+  {
+    name: 'list_channels',
+    description: 'List the Mattermost channels the bot is in that you may read for the person asking, with their purpose and bound workspace. ' + READ_FOR,
+    inputSchema: obj({ message_id: s(MESSAGE_ID) }),
   },
   {
     name: 'list_workspaces',
@@ -62,7 +94,7 @@ const common = (role: Role): Tool[] => [
   },
   {
     name: 'schedule',
-    description: `Set up a scheduled job when a hub owner asks for recurring work ("every weekday at 9, check the alerts"). At each time, the hub hands \`text\` to a router of this workspace as a kind="scheduled" message: in a new thread in the channel of the owner's message each run (default), or in that message's thread (in_this_thread: the router there remembers earlier runs). Owners only: pass message_id, the owner's message asking for it${role === 'worker' ? ' (your task quotes it)' : ''}. The hub posts nothing: once it succeeds, confirm it to the person yourself with reply (when it runs next, and that an owner can remove it with \`!cron rm <id>\`).`,
+    description: `Set up a scheduled job when a hub owner asks for recurring work ("every weekday at 9, check the alerts"). At each time, the hub hands \`text\` to a router of this workspace as a kind="scheduled" message: in a new thread in the channel of the owner's message each run (default), or in that message's thread (in_this_thread: the router there remembers earlier runs). Owners only: pass message_id, the owner's message asking for it${role === 'worker' ? ' (your task quotes it)' : ''}. The hub posts nothing: once it succeeds, confirm it to the person yourself with reply: when it runs next and where. How to remove or pause it only if they ask.`,
     inputSchema: obj({
       schedule: s('When: "every day 09:00", "every weekday 8:30", "every mon,thu 17:00", "every month on the 1st 09:00", "every 2h", "every 30m", or cron "0 9 * * 1-5". Runs at least 15 minutes apart.'),
       text: s('What each run is told: self-contained (it may start with no memory) — what to check or do, and what to post (max 4000 chars)'),

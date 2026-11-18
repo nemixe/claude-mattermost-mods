@@ -33,8 +33,12 @@ export function classifyLater(hub: Hub, a: Classify, post: MMPost, channelType: 
   if (!q) queues.set(hub, (q = new Map()))
   const prev = q.get(a.threadId) ?? Promise.resolve()
   const next = prev.then(async () => {
-    const yes = await verdict(hub, a, post)
-    await hub.enqueue(() => (yes ? hub.act(a.then, post, channelType) : passOver(hub, a)))
+    const v = await verdict(hub, a, post)
+    await hub.enqueue(() => {
+      if (v === true) return hub.act(a.then, post, channelType)
+      if (typeof v === 'number') unfollowQuiet(hub, a.threadId, v)
+      passOver(hub, a)
+    })
   }).catch(err => log('trigger', `${post.id}: ${errMsg(err)}`))
   q.set(a.threadId, next)
   void next.finally(() => {
@@ -43,14 +47,20 @@ export function classifyLater(hub: Hub, a: Classify, post: MMPost, channelType: 
   return next
 }
 
-async function verdict(hub: Hub, a: Classify, post: MMPost): Promise<boolean> {
+/**
+ * true: the post is for the bot. false: it isn't. A number: that many posts went by
+ * since the bot last posted (hub.cfg.unfollowAfter or more), so the hub stops
+ * following the thread and the post isn't judged.
+ */
+async function verdict(hub: Hub, a: Classify, post: MMPost): Promise<boolean | number> {
   const wsName = hub.store.thread(a.threadId)?.workspace ?? loadBindings(hub.p.bindings)[post.channel_id]
   const w = wsName ? hub.ws(wsName) : undefined
   if (!w) return true
   const viaOpenRouter = effective(hub.cfg, w).trigger === 'openrouter'
   const who = viaOpenRouter ? 'OpenRouter' : 'Laya'
   try {
-    const { earlier, people } = await thread(hub, post, viaOpenRouter ? hub.cfg.openrouter.messages : hub.cfg.laya.messages)
+    const { earlier, people, gap } = await thread(hub, post, viaOpenRouter ? hub.cfg.openrouter.messages : hub.cfg.laya.messages)
+    if (hub.cfg.unfollowAfter > 0 && gap >= hub.cfg.unfollowAfter) return gap
     const o = {
       bot: hub.bot.username,
       rules: loadTrigger(w.dir).rules,
@@ -87,6 +97,12 @@ function passOver(hub: Hub, a: Classify): void {
   countSkipped(hub, a.threadId)
 }
 
+/** `gap` posts went by without one from the bot: stop following the thread (a mention follows it again). Call on the chain. */
+function unfollowQuiet(hub: Hub, threadId: string, gap: number): void {
+  if (!following(hub, threadId)) return
+  setFollowing(hub, threadId, false, `${gap} messages went by without a post from you, so the hub stopped following this thread`)
+}
+
 /** One more reply in this hub thread its router didn't get (Laya said no, or it lacked a mention under mention-only). */
 export function countSkipped(hub: Pick<Hub, 'store'>, threadId: string): void {
   const k = `skipped:${threadId}`
@@ -98,10 +114,17 @@ export function following(hub: Hub, threadId: string): boolean {
   return hub.store.get(`follow:${threadId}`) !== 'off'
 }
 
-export function setFollowing(hub: Hub, threadId: string, on: boolean): void {
+/**
+ * Follow a thread, or stop. `why` it stopped is told to its router, with how many
+ * messages it missed, when a mention follows the thread again (takeSkipped).
+ */
+export function setFollowing(hub: Hub, threadId: string, on: boolean, why = 'you unfollowed it'): void {
   if (on) hub.store.del(`follow:${threadId}`)
-  else hub.store.set(`follow:${threadId}`, 'off')
-  log('trigger', `${threadId}: ${on ? 'following' : 'no longer following'}`)
+  else {
+    hub.store.set(`follow:${threadId}`, 'off')
+    hub.store.set(`unfollowed:${threadId}`, why)
+  }
+  log('trigger', `${threadId}: ${on ? 'following' : `no longer following (${why})`}`)
 }
 
 /** Remember that a channel is a DM (posted events say so; threads don't). Call on the chain. */
@@ -116,9 +139,13 @@ export function inDM(hub: Hub, threadId: string): boolean {
   return !!t && hub.store.get(`dm-channel:${t.channelId}`) === '1'
 }
 
-/** The last `n` posts before this one in its thread, and everyone who wrote any post before it (Laya judges replies only). */
-async function thread(hub: Hub, post: MMPost, n: number): Promise<{ earlier: ChatLine[]; people: Person[] }> {
-  if (!post.root_id) return { earlier: [], people: [] }
+/**
+ * The last `n` posts before this one in its thread, everyone who wrote any post before
+ * it (Laya judges replies only), and the gap: posts since the bot's last one there,
+ * this one included.
+ */
+async function thread(hub: Hub, post: MMPost, n: number): Promise<{ earlier: ChatLine[]; people: Person[]; gap: number }> {
+  if (!post.root_id) return { earlier: [], people: [], gap: 0 }
   const res = await hub.mm.getThread(post.root_id)
   const posts = Object.values(res.posts)
     .filter(p => p.id !== post.id && !p.type && p.create_at <= post.create_at)
@@ -132,7 +159,8 @@ async function thread(hub: Hub, post: MMPost, n: number): Promise<{ earlier: Cha
   }
   const earlier: ChatLine[] = []
   for (const p of n > 0 ? posts.slice(-n) : []) earlier.push(await line(hub, p))
-  return { earlier, people }
+  const gap = posts.length - posts.findLastIndex(p => p.user_id === hub.bot.id)
+  return { earlier, people, gap }
 }
 
 /** A post with its author's username, and whether a bot account wrote it. */
@@ -160,9 +188,11 @@ async function mentioned(hub: Hub, text: string): Promise<Person[]> {
 export function takeSkipped(hub: Hub, threadId: string, trigger?: Trigger): string {
   const k = `skipped:${threadId}`
   const n = Number(hub.store.get(k) ?? 0)
+  const unfollowed = hub.store.get(`unfollowed:${threadId}`)
+  if (unfollowed !== undefined) hub.store.del(`unfollowed:${threadId}`)
   if (!n) return ''
   hub.store.set(k, '0')
-  return trigger === 'mention-only'
-    ? `(${n} earlier message(s) in this thread didn't @mention you, so you didn't get them; fetch_thread shows them.)`
-    : `(${n} earlier message(s) in this thread were judged not meant for you, so you didn't get them; fetch_thread shows them.)`
+  if (trigger === 'mention-only') return `(${n} earlier message(s) in this thread didn't @mention you, so you didn't get them; fetch_thread shows them.)`
+  if (unfollowed) return `(${n} earlier message(s) in this thread didn't reach you: ${unfollowed}, and they didn't @mention you. You follow it again now. fetch_thread shows them.)`
+  return `(${n} earlier message(s) in this thread were judged not meant for you, so you didn't get them; fetch_thread shows them.)`
 }

@@ -134,7 +134,7 @@ export async function runCommand(hub: Hub, a: Extract<InboundAction, { kind: 'co
         if (t === 'mention-only') return say(`Workspace \`${thread.workspace}\` takes only messages that mention me (trigger mention-only), so there is nothing to ${a.name}.`)
         if (!judged(t)) return say(`Workspace \`${thread.workspace}\` takes every reply in its threads (no judge is on), so there is nothing to ${a.name}.`)
         const on = a.name === 'follow'
-        if (following(hub, thread.id) !== on) setFollowing(hub, thread.id, on)
+        if (following(hub, thread.id) !== on) setFollowing(hub, thread.id, on, 'an owner stopped it with !unfollow')
         return say(on
           ? `👂 Following this thread: ${judgeName(t)} passes me the messages here that are meant for me.`
           : 'Stopped following this thread: only messages that mention me reach me now, and a mention follows it again.')

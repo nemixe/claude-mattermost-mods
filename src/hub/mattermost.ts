@@ -14,6 +14,8 @@ export type MMPost = {
   create_at: number
   update_at?: number
   user_id: string
+  /** Root posts: how many replies (Mattermost 6+). */
+  reply_count?: number
   channel_id: string
   root_id: string
   message: string
@@ -30,7 +32,9 @@ export function isBotPost(post: Pick<MMPost, 'props'>): boolean {
   const p = post.props ?? {}
   return p.from_bot === 'true' || p.from_bot === true || p.from_webhook === 'true' || p.from_webhook === true
 }
-export type MMChannel = { id: string; type: string; name: string; display_name: string; team_id: string }
+export type MMChannel = { id: string; type: string; name: string; display_name: string; team_id: string; purpose?: string }
+export type MMTeam = { id: string; name: string; display_name: string }
+export type MMPostList = { order: string[]; posts: Record<string, MMPost> }
 export type MMReaction = { user_id: string; post_id: string; emoji_name: string }
 
 export type MMEvent =
@@ -145,6 +149,47 @@ export class Mattermost {
   /** Posts in a channel created/updated after `since` (ms epoch) — used to catch up after a reconnect. */
   postsSince(channelId: string, since: number): Promise<{ order: string[]; posts: Record<string, MMPost> }> {
     return this.json('GET', `/channels/${encodeURIComponent(channelId)}/posts?since=${since}`)
+  }
+
+  /** Whether the user is a member of the channel (false too when the bot can't see its members). */
+  async isMember(channelId: string, userId: string): Promise<boolean> {
+    try {
+      await this.request('GET', `/channels/${encodeURIComponent(channelId)}/members/${encodeURIComponent(userId)}`)
+      return true
+    } catch (err) {
+      if (err instanceof MattermostError && (err.status === 404 || err.status === 403)) return false
+      throw err
+    }
+  }
+
+  /** The teams the bot is in. */
+  myTeams(): Promise<MMTeam[]> {
+    return this.json('GET', '/users/me/teams')
+  }
+
+  /** The channels the bot is a member of in a team (DMs and group messages included). */
+  myChannels(teamId: string): Promise<MMChannel[]> {
+    return this.json('GET', `/users/me/teams/${encodeURIComponent(teamId)}/channels`)
+  }
+
+  /** A channel by its name (the URL's, as in ~town-square) in a team; undefined when there is none the bot can see. */
+  async channelByName(teamId: string, name: string): Promise<MMChannel | undefined> {
+    try {
+      return await this.json<MMChannel>('GET', `/teams/${encodeURIComponent(teamId)}/channels/name/${encodeURIComponent(name)}`)
+    } catch (err) {
+      if (err instanceof MattermostError && (err.status === 404 || err.status === 403)) return undefined
+      throw err
+    }
+  }
+
+  /** A channel's latest posts (replies included), newest first in `order`; `before`: older than that post. */
+  channelPosts(channelId: string, perPage: number, before?: string): Promise<MMPostList> {
+    return this.json('GET', `/channels/${encodeURIComponent(channelId)}/posts?per_page=${perPage}${before ? `&before=${encodeURIComponent(before)}` : ''}`)
+  }
+
+  /** Mattermost search in a team (its syntax: words, "a phrase", from:, in:, after:, before:), over channels the bot is in. */
+  searchPosts(teamId: string, terms: string, perPage: number): Promise<MMPostList> {
+    return this.json('POST', `/teams/${encodeURIComponent(teamId)}/posts/search`, { terms, is_or_search: false, include_deleted_channels: false, page: 0, per_page: perPage })
   }
 
   addReaction(userId: string, postId: string, emoji: string): Promise<unknown> {
