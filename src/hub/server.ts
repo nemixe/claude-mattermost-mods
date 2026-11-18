@@ -64,8 +64,10 @@ export function listen(hub: Hub, sockPath: string, control: ControlHandler): net
           case 'hook': {
             if (!SESSION_KEY_RE.test(m.key)) return send({ t: 'hook_result' })
             const additionalContext = m.event === 'SessionStart' ? hub.hookContext(m.key) : undefined
-            send({ t: 'hook_result', ...(additionalContext ? { additionalContext } : {}) })
-            void hub.enqueue(() => hub.applyHook(m))
+            // A turn sent back goes on: its Stop isn't the end of it.
+            const block = hub.unpostedStop(m)
+            send({ t: 'hook_result', ...(additionalContext ? { additionalContext } : {}), ...(block ? { block } : {}) })
+            if (!block) void hub.enqueue(() => hub.applyHook(m))
             return
           }
           case 'control': {

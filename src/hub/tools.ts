@@ -332,7 +332,16 @@ export async function queueTask(hub: Hub, key: string, thread: ThreadRow, text: 
 }
 
 /** Run one tool call for session `key`. Returns the text shown to the model. */
+/** Tools that reach someone: a post, a reaction, a worker, another workspace, an owner, or leaving a thread. */
+const REACHES = new Set(['reply', 'react', 'edit_message', 'delegate', 'message_workspace', 'send_dm', 'unfollow'])
+
 export async function handleCall(hub: Hub, key: string, tool: string, a: Args): Promise<string> {
+  const text = await callTool(hub, key, tool, a)
+  if (REACHES.has(tool)) hub.acted(key)
+  return text
+}
+
+async function callTool(hub: Hub, key: string, tool: string, a: Args): Promise<string> {
   const role = key.startsWith('r-') ? 'router' : 'worker'
   switch (tool) {
     case 'reply': {

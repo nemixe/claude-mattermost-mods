@@ -285,6 +285,69 @@ describe('typing indicator', () => {
   }, T)
 })
 
+/** A Stop hook the way the hub's socket answers it: the turn is sent back, or it ends. */
+async function stopWith(hub: Hub, key: string, text: string, active = false): Promise<string | undefined> {
+  const block = hub.unpostedStop({ t: 'hook', key, event: 'Stop', stop_hook_active: active, text })
+  if (!block) await hook(hub, key, 'Stop')
+  return block
+}
+
+describe('a turn that posts nothing', () => {
+  test('ending with text but no reply goes back to the session once, to post it', async () => {
+    const { hub, tmux, posts } = setup()
+    const w = hub.ws('demo')!
+    const rkey = hub.createRouter({ threadId: 'T2', channelId: 'C1', workspace: w, label: 'recap' })
+    await hub.enqueue(() => hub.deliver(rkey, 'recap the issues in that thread as a table', { chat_id: 'C1', thread_id: 'T2', message_id: 'm1', user: 'ami' }))
+    await connect(hub, tmux, rkey, 1)
+    await handleCall(hub, rkey, 'fetch_thread', {}) // reading reaches no one
+
+    // The table went to its terminal: the turn goes on, still busy, the message still in flight.
+    const block = await stopWith(hub, rkey, '| # | Issue | Status |\n|---|---|---|\n| 1 | Financial impact | Saved |')
+    expect(block).toContain('Nothing was posted this turn: people read Mattermost, not this terminal')
+    expect(block).toContain('send it now with reply (thread_id T2): all of it')
+    expect(hub.store.session(rkey)!.status).toBe('busy')
+    expect(hub.inFlight(rkey)).toBe(1)
+    expect(posts).toEqual([])
+
+    // Claude Code marks the Stop after a sent-back turn: that one ends the turn, whatever it says.
+    expect(await stopWith(hub, rkey, 'Posted the table.', true)).toBeUndefined()
+    expect(hub.store.session(rkey)!.status).toBe('idle')
+    expect(hub.inFlight(rkey)).toBe(0)
+  }, T)
+
+  test('not after a reply, not without text, not for a turn the hub did not start', async () => {
+    const { hub, tmux } = setup()
+    const w = hub.ws('demo')!
+    const rkey = hub.createRouter({ threadId: 'T2', channelId: 'C1', workspace: w, label: 'recap' })
+    await hub.enqueue(() => hub.deliver(rkey, 'what is left?', { chat_id: 'C1', thread_id: 'T2', message_id: 'm1', user: 'ami' }))
+    const b = await connect(hub, tmux, rkey, 1)
+    await handleCall(hub, rkey, 'reply', { text: 'Two items are left.' })
+    expect(await stopWith(hub, rkey, 'Answered Ami in the thread.')).toBeUndefined()
+    expect(hub.store.session(rkey)!.status).toBe('idle')
+
+    await hub.enqueue(() => hub.deliver(rkey, 'thanks', { chat_id: 'C1', thread_id: 'T2', message_id: 'm2', user: 'ami' }))
+    expect(b.got.length).toBe(2)
+    expect(await stopWith(hub, rkey, '  ')).toBeUndefined() // said nothing on purpose
+    expect(hub.store.session(rkey)!.status).toBe('idle')
+
+    // Someone typed in its terminal: that turn's text is for them.
+    expect(await stopWith(hub, rkey, 'Here is the summary you asked for.')).toBeUndefined()
+  }, T)
+
+  test("a worker that writes its result instead of reporting is told the router reads only its reports", async () => {
+    const { hub, tmux, w } = setup()
+    const { key } = worker(hub, w)
+    await hub.enqueue(() => hub.ensureStarted(key))
+    await connect(hub, tmux, key, 1)
+    const block = await stopWith(hub, key, 'Fixed the login bug; tests pass.')
+    expect(block).toContain("Nothing was posted this turn: the thread's router reads only your reports, not this terminal")
+    expect(block).toContain('reply (thread_id T1)')
+    expect(hub.store.session(key)!.status).toBe('busy')
+    await stopWith(hub, key, 'Reported.', true)
+    expect(hub.store.session(key)!.status).toBe('idle')
+  }, T)
+})
+
 describe('graceful restart', () => {
   test('waits for the turn to end, then relaunches with --resume; late hooks of the old process are ignored', async () => {
     const { hub, tmux, w } = setup()

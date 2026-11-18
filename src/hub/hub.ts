@@ -76,6 +76,12 @@ type Live = {
   recheck?: ReturnType<typeof setTimeout>
   /** The provider the current process was launched with. */
   provider?: string
+  /**
+   * A message went in and the session hasn't reached anyone since (reply, react,
+   * delegate, …). A turn that ends like this with text wrote that text to its
+   * terminal, where nobody reads it: its Stop hook sends it back once to post it.
+   */
+  unposted?: boolean
 }
 
 /** Ticks (every 5 s) further apart than this, or hub timers quiet this long: re-arm everything. */
@@ -698,6 +704,7 @@ export class Hub {
     }
     l.conn!.send({ t: 'inbound', content: m.content, meta: m.meta })
     l.lastDeliveredAt = Date.now()
+    l.unposted = true
     this.patch(key, { status: 'busy', busySince: this.store.session(key)?.busySince ?? Date.now(), lastActiveAt: Date.now() })
     if (key.startsWith('r-') && m.meta.chat_id && m.meta.thread_id && !isDraft(m.meta.thread_id)) this.mm.typing(m.meta.chat_id, m.meta.thread_id)
   }
@@ -960,6 +967,30 @@ export class Hub {
     }, 3000)
   }
 
+  /** The session reached someone (a post, a reaction, a worker, …): its turn has said what it had to. */
+  acted(key: string): void {
+    const l = this.live.get(key)
+    if (l) l.unposted = false
+  }
+
+  /**
+   * A Stop hook, answered right away: the turn goes back to the session when it
+   * ends with text but reached no one since a message went in — that text went to
+   * its terminal, where nobody reads it. Once a turn (Claude Code sets
+   * stop_hook_active on the Stop that follows), so it can never loop.
+   */
+  unpostedStop(m: Extract<ClientMsg, { t: 'hook' }>): string | undefined {
+    const l = this.live.get(m.key)
+    const row = this.store.session(m.key)
+    if (m.event !== 'Stop' || m.stop_hook_active || !m.text?.trim() || !l?.unposted || l.starting || !row || !isLive(row.status)) return undefined
+    if (m.spawn && l.spawnId && m.spawn !== l.spawnId) return undefined
+    l.unposted = false
+    const t = this.activeThreadOf(m.key)
+    log('lifecycle', `${m.key}: turn ended with text but posted nothing — sent back to post it`)
+    const to = m.key.startsWith('r-') || this.cfg.workerReports === 'thread' ? 'people read Mattermost' : "the thread's router reads only your reports"
+    return `Nothing was posted this turn: ${to}, not this terminal, so the text you just wrote reached no one. If it was meant for them, send it now with reply${t ? ` (thread_id ${t.id})` : ''}: all of it, not a summary or a pointer to it. If you meant to post nothing, end your turn without writing anything.`
+  }
+
   /** SessionStart context — answered right away (read-only). */
   hookContext(key: string): string | undefined {
     const row = this.store.session(key)
@@ -1037,6 +1068,7 @@ export class Hub {
     const row = this.store.session(key)
     if (!row || !isLive(row.status)) return
     const l = this.liveOf(key)
+    l.unposted = false
     for (const p of this.desk.drain(key)) if (p.postId) void this.mm.patchPost(p.postId, { message: staleText(p) }).catch(() => {})
     if (failed) await this.turnFailed(key, error)
     else {
