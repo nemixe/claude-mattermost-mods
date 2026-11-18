@@ -177,3 +177,19 @@ Your summary: ${o.worker.summary || '(empty — set it with update_summary)'}
 How you report (the current rules; they replace anything earlier about posting):
 ${workerReportingRules(o.reports)}${triggerNote(w, 'worker', o.trigger ?? 'mention')}`
 }
+
+/**
+ * A worker's cleanup job (kind="cleanup"), after `hours` without work: its own
+ * session clears what its work left running and built. Nothing is posted.
+ */
+export function cleanupJob(o: { hours: number; worktrees: { name: string; path: string; shared?: boolean }[] }): string {
+  const own = o.worktrees.filter(t => !t.shared)
+  const shared = o.worktrees.filter(t => t.shared)
+  const list = (ts: typeof own) => ts.map(t => `- ${t.path} (${t.name})`).join('\n')
+  return `Cleanup: you have had no work for ${o.hours} hours. Clear what your work here left running and built, so it stops holding this machine's ports, memory and disk:
+- Processes you started that still run (dev servers, watchers, background jobs): stop them. \`lsof -nP -iTCP -sTCP:LISTEN\` shows what holds ports.
+- Docker: remove the containers you started (\`docker compose down\` in the worktree for a compose project) and the images you built for this work. Leave containers, images and volumes you did not create alone.
+- Build output and installed dependencies in your worktrees: delete node_modules, dist, build, .next, out, target, coverage, caches and the like. They can be rebuilt.
+${own.length ? `Your worktrees:\n${list(own)}` : 'You have no worktrees of your own: only processes and containers to check.'}${shared.length ? `\nShared with other sessions, so leave their dependencies and build output alone:\n${list(shared)}` : ''}
+Never delete source files, uncommitted changes, .env or other config files, or anything outside these worktrees, and don't use git clean. Nothing to clear is fine. Post and report nothing: just end your turn when done.`
+}

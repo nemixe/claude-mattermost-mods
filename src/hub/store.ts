@@ -441,6 +441,7 @@ export class Store {
   deleteWorker(key: string): void {
     this.db.query('DELETE FROM workers WHERE key = ?').run(key)
     this.db.query('DELETE FROM sessions WHERE key = ?').run(key)
+    this.db.query('DELETE FROM kv WHERE k = ?').run(`cleaned:${key}`)
     this.db.query("UPDATE tasks SET state = 'failed' WHERE worker_key = ? AND state IN ('queued','delivered','interrupted')").run(key)
   }
 

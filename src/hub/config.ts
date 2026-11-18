@@ -50,6 +50,12 @@ export type HubConfig = {
   workerReports: 'router' | 'thread'
   /** Post "💤 closed after Nm idle" in the thread when a session auto-closes. */
   announceClose: boolean
+  /**
+   * Hours a worker may go without activity before it gets a cleanup job: its own
+   * session stops what it left running and removes containers, images, build output
+   * and dependencies from its worktrees. 0 = never.
+   */
+  cleanupHours: number
   /** Minutes without a hook event before a busy worker is flagged. */
   busyWatchdogMinutes: number
   claudeBin?: string
@@ -107,6 +113,7 @@ export const DEFAULT_CONFIG: HubConfig = {
   maxWorkersPerWorkspace: 6,
   workerReports: 'router',
   announceClose: false,
+  cleanupHours: 24,
   busyWatchdogMinutes: 30,
   disablePlugins: [],
   tmuxSocket: 'mmhub',
@@ -127,7 +134,13 @@ export function loadConfig(file: string): HubConfig {
     providers: Array.isArray(raw.providers) ? raw.providers.filter((n): n is string => typeof n === 'string') : undefined,
     trigger: isTrigger(raw.trigger) ? raw.trigger : 'mention',
     unfollowAfter: typeof raw.unfollowAfter === 'number' && raw.unfollowAfter >= 0 ? Math.floor(raw.unfollowAfter) : DEFAULT_CONFIG.unfollowAfter,
+    cleanupHours: hours(raw.cleanupHours) ?? DEFAULT_CONFIG.cleanupHours,
     laya: { ...DEFAULT_LAYA, ...(raw.laya ?? {}) },
     openrouter: { ...DEFAULT_OPENROUTER, ...(raw.openrouter ?? {}) },
   }
+}
+
+/** A number of hours ≥ 0 (cleanupHours), else undefined. */
+export function hours(v: unknown): number | undefined {
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : undefined
 }

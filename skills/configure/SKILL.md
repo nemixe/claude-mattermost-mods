@@ -69,6 +69,7 @@ Read, change one key, write back pretty-printed (2 spaces). Keys:
 | `idleMinutes.router` / `idleMinutes.worker` | minutes idle before a session auto-closes (defaults 30 / 120; `0` = never) |
 | `maxLiveRouters` / `maxLiveWorkers` / `maxWorkersPerWorkspace` | caps (6 / 4 / 6) |
 | `announceClose` | `true` posts "💤 closed after Nm idle" in the thread |
+| `cleanupHours` | hours a worker may go without work before its own session cleans up: stops processes it left running, removes its Docker containers and images, deletes build output and `node_modules` in its worktrees, its permission prompts allowed as with `bypassPermissions` and logged (default 24; `0` = never; a workspace's `workspace.json` can override it) |
 | `workspacesDir` | where workspaces live (default `~/claude-workspaces`); afterwards run `mmhub ws template` to create `<workspacesDir>/workspace-template/`, the folder new workspaces are copied from |
 | `routerAutocompact` | token window for router auto-compaction |
 | `claudeBin` / `bunBin` / `gitBin` | absolute paths |

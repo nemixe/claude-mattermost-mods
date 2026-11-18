@@ -330,7 +330,7 @@ async function doctor(): Promise<never> {
   const bindings = loadBindings(p.bindings)
   for (const [ch, ws] of Object.entries(bindings)) check(!!loadWorkspace(cfg, ws), `channel ${ch} → workspace ${ws}`)
   if (!Object.keys(bindings).length) check(true, 'no channels bound yet (mention the bot in a channel, or `mmhub ws bind`)')
-  check(true, `models: router ${cfg.routerModel}, worker ${cfg.workerModel}; idle close: router ${cfg.idleMinutes.router}m, worker ${cfg.idleMinutes.worker}m`)
+  check(true, `models: router ${cfg.routerModel}, worker ${cfg.workerModel}; idle close: router ${cfg.idleMinutes.router}m, worker ${cfg.idleMinutes.worker}m; worker cleanup ${cfg.cleanupHours ? `after ${cfg.cleanupHours}h without work` : 'off'}`)
   const defs = loadProviders(p.dir)
   for (const [name, def] of Object.entries(defs)) {
     const errs = validateDef(name, def)

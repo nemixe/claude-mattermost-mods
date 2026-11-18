@@ -348,6 +348,86 @@ describe('a turn that posts nothing', () => {
   }, T)
 })
 
+describe('cleanup after a day without work', () => {
+  const H = 3_600_000
+  /** A closed worker with worktrees, last active `ago` ms before `now`. */
+  function idleWorker(hub: Hub, w: Workspace, now: number, ago: number) {
+    const key = hub.createWorker({ workspace: w, title: 'Fixer', summary: 'fixes things' })
+    hub.store.patchWorker(key, { threads: ['T1'], repos: { app: { path: '/ws/.worktrees/app-fixer', branch: 'fixer' }, notes: { path: '/ws/notes', shared: true } } })
+    hub.store.patchSession(key, { lastActiveAt: now - ago })
+    return key
+  }
+
+  test("the worker's own session gets the job, posts nothing, and closes after it; once per stretch without work", async () => {
+    const { hub, tmux, w, posts, typing } = setup()
+    const now = Date.now()
+    const key = idleWorker(hub, w, now, 25 * H)
+    await hub.enqueue(() => hub.cleanupDue(now))
+    const b = await connect(hub, tmux, key, 1)
+    expect(b.got.length).toBe(1)
+    expect(b.got[0]!.meta.kind).toBe('cleanup')
+    const job = b.got[0]!.content
+    expect(job).toContain('Cleanup: you have had no work for 24 hours')
+    expect(job).toContain('docker compose down')
+    expect(job).toContain('delete node_modules, dist, build')
+    expect(job).toContain('Your worktrees:\n- /ws/.worktrees/app-fixer (app)')
+    expect(job).toContain('Shared with other sessions, so leave their dependencies and build output alone:\n- /ws/notes (notes)')
+    expect(job).toContain("don't use git clean")
+
+    hub.keepTyping()
+    expect(typing).toEqual([]) // nobody is waiting on it in the thread
+
+    // Unattended, as with bypassPermissions: a prompt is allowed at once, without a 🔐 post.
+    const answers: HubMsg[] = []
+    const send = b.conn.send
+    b.conn.send = m => { answers.push(m); send(m) }
+    await hub.enqueue(() => hub.onPermissionRequest(key, { t: 'permission_request', request_id: 'abcde', tool_name: 'Bash', description: 'Remove build output', input_preview: '{"command":"rm -rf node_modules dist"}' }))
+    expect(answers).toEqual([{ t: 'permission', request_id: 'abcde', behavior: 'allow' }])
+    expect(hub.desk.count(key)).toBe(0)
+
+    expect(hub.unpostedStop({ t: 'hook', key, event: 'Stop', text: 'Removed node_modules and dist.' })).toBeUndefined()
+
+    await hook(hub, key, 'Stop')
+    expect(hub.store.session(key)!.status).toBe('stopped')
+    expect(posts).toEqual([])
+
+    // Done for this stretch: no second job until it has worked again.
+    await hub.enqueue(() => hub.cleanupDue(now + 48 * H))
+    expect(tmux.launches.length).toBe(1)
+    hub.store.patchSession(key, { lastActiveAt: now + 50 * H })
+    await hub.enqueue(() => hub.cleanupDue(now + 75 * H))
+    await until('second cleanup launch', () => tmux.launches.length === 2)
+  }, T)
+
+  test('not before cleanupHours, nor with work waiting, nor pinned; 0 turns it off; a task drops a waiting job', async () => {
+    const { hub, tmux, w } = setup()
+    const now = Date.now()
+    const recent = idleWorker(hub, w, now, 23 * H)
+    const pinned = idleWorker(hub, w, now, 25 * H)
+    hub.store.patchSession(pinned, { pinned: true })
+    const busy = worker(hub, w) // a task waits for it
+    hub.store.patchSession(busy.key, { lastActiveAt: now - 25 * H })
+    await hub.enqueue(() => hub.cleanupDue(now))
+    expect(hub.store.messagesFor(recent, ['queued'])).toEqual([])
+    expect(hub.store.messagesFor(pinned, ['queued'])).toEqual([])
+    expect(hub.store.messagesFor(busy.key, ['queued'])).toEqual([])
+
+    hub.cfg.cleanupHours = 0
+    const off = idleWorker(hub, w, now, 100 * H)
+    await hub.enqueue(() => hub.cleanupDue(now))
+    expect(hub.store.messagesFor(off, ['queued'])).toEqual([])
+    hub.cfg.cleanupHours = 24
+
+    // A job and a task both wait: the task goes in, the job is dropped.
+    const both = worker(hub, w)
+    const jobId = hub.store.insertMessage({ sessionKey: both.key, content: 'Cleanup: …', meta: { kind: 'cleanup' }, state: 'queued', createdAt: now })
+    await hub.enqueue(() => hub.ensureStarted(both.key))
+    const b = await connect(hub, tmux, both.key, 1)
+    expect(b.got.map(m => m.meta.task_id)).toEqual([String(both.taskId)])
+    expect(hub.store.messagesFor(both.key, ['ended']).map(m => m.id)).toEqual([jobId])
+  }, T)
+})
+
 describe('graceful restart', () => {
   test('waits for the turn to end, then relaunches with --resume; late hooks of the old process are ignored', async () => {
     const { hub, tmux, w } = setup()

@@ -21,7 +21,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSy
 import { basename, dirname, isAbsolute, join, resolve } from 'path'
 import { expandHome } from '../shared/paths'
 import { readJson, slug, writeJsonAtomic } from '../shared/util'
-import { isTrigger, type HubConfig, type IdleMinutes, type Trigger } from './config'
+import { hours, isTrigger, type HubConfig, type IdleMinutes, type Trigger } from './config'
 
 export type RepoRef = { name: string; path: string }
 
@@ -35,6 +35,8 @@ export type WorkspaceManifest = {
   workerModel?: string
   workerPermissionMode?: string
   idleMinutes?: Partial<IdleMinutes>
+  /** Hours a worker may go without activity before its cleanup job (else config.json's; 0 = never). */
+  cleanupHours?: number
   /**
    * Providers for this workspace's sessions, in fallback order (providers.json
    * names, "default" for the hub's own login, "hub" for the hub-wide list).
@@ -392,6 +394,7 @@ export function effective(cfg: HubConfig, w: Workspace) {
     workerModel: w.workerModel ?? cfg.workerModel,
     workerPermissionMode: w.workerPermissionMode ?? cfg.workerPermissionMode,
     idleMinutes: { ...cfg.idleMinutes, ...(w.idleMinutes ?? {}) } as IdleMinutes,
+    cleanupHours: hours(w.cleanupHours) ?? cfg.cleanupHours,
     trigger: (isTrigger(w.trigger) ? w.trigger : cfg.trigger) as Trigger,
   }
 }

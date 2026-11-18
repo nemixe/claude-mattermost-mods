@@ -425,7 +425,7 @@ notes, `.claude/settings.json` permission rules, `.mcp.json` servers or any othe
 
 - `{{name}}` and `{{description}}` in text files become the new workspace's values.
 - Its `workspace.json` holds default settings for new workspaces (e.g. `workerModel`,
-  `idleMinutes`, `baseRef`); `name`, `description` and `repos` there are ignored.
+  `idleMinutes`, `cleanupHours`, `baseRef`); `name`, `description` and `repos` there are ignored.
 - Not copied: `_TEMPLATE.md` (its own notes), `workspace.json`, `repos/`, `.worktrees/`, `inbox/`, `.git`.
 - Existing workspaces are never changed, and once the template exists the hub never
   re-adds files you deleted from it. `workspace-template` is a reserved name.
@@ -461,7 +461,8 @@ launch files), `providers.json` and `providers/<name>/` (provider logins and sec
 `workerArgs`, `workerPermissionMode` (`acceptEdits`), `workerReports` (`router`: workers report
 to the router; `thread`: they post in the thread), `idleMinutes` (`{router:30, worker:120}`,
 0 = never), `maxLiveRouters` (6), `maxLiveWorkers` (4), `maxWorkersPerWorkspace` (6),
-`announceClose`, `busyWatchdogMinutes` (30), `routerAutocompact`, `claudeBin`, `bunBin`,
+`announceClose`, `cleanupHours` (24: a worker with no work this long cleans up after
+itself, see [Lifecycle](#lifecycle); 0 = never), `busyWatchdogMinutes` (30), `routerAutocompact`, `claudeBin`, `bunBin`,
 `gitBin`, `path`, `tmuxSocket` (`mmhub`), `providers` (`["default"]`),
 `providerCooldownMinutes` (`{auth:60, quota:60, rate_limit:10, errors:15, channels:360}`),
 `trigger` (`mention`; or `mention-only`, `laya`, `openrouter`, see [above](#answering-without-a-mention-laya)),
@@ -527,6 +528,21 @@ nothing can give way, work waits (`delegate` reports `waiting_for_slot`). Resumi
 checks the transcript first and falls back to a fresh session (the router is told to
 re-read the thread). `mmhub stop` leaves sessions running; the next `mmhub start`
 adopts them.
+
+**Cleanup.** A worker with no work for `cleanupHours` (24 by default) gets a cleanup
+job from the hub, and its own session does it: it stops the dev servers, watchers and
+background jobs it left running (freeing their ports), removes the Docker containers it
+started and the images it built, and deletes build output and installed dependencies in
+its own worktrees (`node_modules`, `dist`, `build`, `.next`, `target`, …). It leaves
+source files, uncommitted changes, `.env` and config files, shared folders and anything
+it didn't create alone, and posts nothing. A closed worker is resumed for the job when a
+worker slot is free, and closed again after it. A worker gets one job per stretch
+without work, and none while it is pinned, failed or has a task waiting; a task that
+comes in first drops the job. The job runs unattended, as with `bypassPermissions`:
+whatever the worker's permission mode, its permission prompts are allowed at once (no
+🔐 post), and each one is logged in `hub.log` (`perm: … cleanup — allowed …`). Routers
+can't run commands, so they get no job. `cleanupHours: 0` turns it off, in `config.json` or a workspace's
+`workspace.json`.
 
 **Sleep.** Bun timers pending while macOS sleeps can stay stuck after it wakes (seen
 with Bun 1.3.14 after a hibernate: no heartbeat, no reaper, no Mattermost ping, while

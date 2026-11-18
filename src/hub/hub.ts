@@ -26,7 +26,7 @@ import { classifyLater, countSkipped, following, inDM, noteDM, setFollowing, tak
 import { canRestartNow, classifyFailure, dueForIdleClose, isLive, looksBusy, noticeForRetry, pickEvictee, planStart, RestartBudget, retryDelay, type ReapView } from './lifecycle'
 import type { Mattermost, MMPost, MMReaction } from './mattermost'
 import { answeredText, PermissionDesk, promptText, staleText } from './permissions'
-import { routerContext, routerPersona, routerPrompt, workerContext, workerPrompt } from './prompts'
+import { cleanupJob, routerContext, routerPersona, routerPrompt, workerContext, workerPrompt } from './prompts'
 import {
   baseConfigDir, buildLaunch, chooseProvider, cooling, DEFAULT_PROVIDER, kindOf, knownConfigDirs, loadProviders, markFailed, markOk,
   providerChain, providerFault, redact, resetTime, startupProblem, syncTranscript, unusableReason,
@@ -82,6 +82,8 @@ type Live = {
    * terminal, where nobody reads it: its Stop hook sends it back once to post it.
    */
   unposted?: boolean
+  /** The turn running is a cleanup job: no typing, no unposted check, its permission prompts allowed, and the session closes after it. */
+  cleaning?: boolean
 }
 
 /** Ticks (every 5 s) further apart than this, or hub timers quiet this long: re-arm everything. */
@@ -199,6 +201,36 @@ export class Hub {
     return isDraft(id) ? '(not posted yet)' : this.mm.permalink(id)
   }
 
+  /** Hours a worker may go without work before its cleanup job (0 = never). */
+  cleanupHoursFor(workspace: string): number {
+    const w = this.ws(workspace)
+    return w ? effective(this.cfg, w).cleanupHours : this.cfg.cleanupHours
+  }
+
+  /**
+   * Workers without work for cleanupHours (24 by default) get a cleanup job: their
+   * own session stops what it left running and removes its containers, images,
+   * build output and dependencies (prompts.ts cleanupJob). Once per stretch without
+   * work; not for pinned or failed workers, nor ones with work waiting. A closed
+   * worker is resumed for it and closed again after. Call on the chain.
+   */
+  async cleanupDue(now = Date.now()): Promise<void> {
+    for (const s of this.store.sessions({ role: 'worker' })) {
+      const hours = this.cleanupHoursFor(s.workspace)
+      if (hours <= 0 || s.pinned || s.status === 'failed' || s.status === 'busy' || now - s.lastActiveAt < hours * 3_600_000) continue
+      if (Number(this.store.get(`cleaned:${s.key}`) ?? 0) >= s.lastActiveAt) continue
+      if (this.queued(s.key) > 0 || this.inFlight(s.key) > 0) continue
+      // A closed worker waits for a free slot rather than closing another for its cleanup.
+      if (!isLive(s.status) && this.liveCount('worker') >= this.cap('worker')) continue
+      const w = this.store.worker(s.key)
+      if (!w) continue
+      this.store.set(`cleaned:${s.key}`, String(now))
+      const worktrees = Object.entries(w.repos).map(([name, t]) => ({ name, ...t }))
+      log('lifecycle', `${s.key}: no work for ${fmtAge(now - s.lastActiveAt)} — cleanup job`)
+      await this.deliver(s.key, cleanupJob({ hours, worktrees }), { kind: 'cleanup', workspace: s.workspace })
+    }
+  }
+
   idleMinutesFor(s: { role: Role; workspace: string }): number {
     const w = this.ws(s.workspace)
     const idle = w ? effective(this.cfg, w).idleMinutes : this.cfg.idleMinutes
@@ -207,12 +239,14 @@ export class Hub {
 
   /** Work handed to the session whose turn hasn't ended (worker tasks, router messages). */
   inFlight(key: string): number {
-    return key.startsWith('w-') ? this.store.tasksFor(key, ['delivered']).length : this.store.messagesFor(key, ['delivered']).length
+    const messages = this.store.messagesFor(key, ['delivered']).length
+    return key.startsWith('w-') ? this.store.tasksFor(key, ['delivered']).length + messages : messages
   }
 
   /** Work waiting for the session (queued, or interrupted and to be re-delivered). */
   queued(key: string): number {
-    return key.startsWith('w-') ? this.store.pendingTasks(key).length : this.store.pendingMessages(key).length
+    const messages = this.store.pendingMessages(key).length
+    return key.startsWith('w-') ? this.store.pendingTasks(key).length + messages : messages
   }
 
   /** New work waits: an automatic retry after an API error is scheduled. */
@@ -704,7 +738,8 @@ export class Hub {
     }
     l.conn!.send({ t: 'inbound', content: m.content, meta: m.meta })
     l.lastDeliveredAt = Date.now()
-    l.unposted = true
+    l.cleaning = m.meta.kind === 'cleanup'
+    l.unposted = !l.cleaning
     this.patch(key, { status: 'busy', busySince: this.store.session(key)?.busySince ?? Date.now(), lastActiveAt: Date.now() })
     if (key.startsWith('r-') && m.meta.chat_id && m.meta.thread_id && !isDraft(m.meta.thread_id)) this.mm.typing(m.meta.chat_id, m.meta.thread_id)
   }
@@ -733,7 +768,14 @@ export class Hub {
     // A pending restart: new work waits for the restarted session, which has the new settings.
     if (!l.ready || !l.conn || this.held(key) || this.restartPending(key)) return
     if (key.startsWith('w-')) {
-      if (this.inFlight(key) === 0) this.deliverNextTask(key)
+      if (this.inFlight(key) > 0) return
+      // A task first; a cleanup job only when nothing else waits (a task makes the worker active again).
+      const jobs = this.store.pendingMessages(key)
+      if (this.deliverNextTask(key)) {
+        for (const m of jobs) if (m.meta.kind === 'cleanup') this.store.setMessageState(m.id, 'ended')
+        return
+      }
+      if (jobs[0]) this.sendMessage(key, jobs[0])
       return
     }
     const pending = this.store.pendingMessages(key)
@@ -780,7 +822,7 @@ export class Hub {
   }
 
   /** Close a session gracefully (/exit, then kill). Call on the chain. */
-  async close(key: string, reason: CloseReason): Promise<void> {
+  async close(key: string, reason: CloseReason, announce = true): Promise<void> {
     const row = this.store.session(key)
     if (!row) return
     const name = tmuxName(key)
@@ -801,7 +843,7 @@ export class Hub {
     }
     this.markStopped(key, reason)
     log('lifecycle', `${key}: closed (${reason})`)
-    if (reason === 'idle' && this.cfg.announceClose) {
+    if (reason === 'idle' && announce && this.cfg.announceClose) {
       const t = this.activeThreadOf(key)
       await this.notice(t, `💤 **${this.label(key)}** closed after ${this.idleMinutesFor(row)}m idle — mention me to resume.`)
     }
@@ -814,6 +856,7 @@ export class Hub {
     l.starting = false
     l.conn = undefined
     l.helloAt = 0
+    l.cleaning = false
     const interrupted = this.store.moveDelivered(key, 'interrupted')
     for (const p of this.desk.drain(key)) if (p.postId) void this.mm.patchPost(p.postId, { message: staleText(p) }).catch(() => {})
     if (reason === 'manual') this.clearRetry(key)
@@ -1078,6 +1121,16 @@ export class Hub {
     }
     if (row.role === 'worker') this.store.patchWorker(key, { activeTask: undefined })
     this.patch(key, { status: 'idle', busySince: undefined, lastActiveAt: Date.now() })
+    if (l.cleaning) {
+      l.cleaning = false
+      // Done for this stretch without work: the next one starts at its next activity.
+      this.store.set(`cleaned:${key}`, String(Date.now()))
+      log('lifecycle', `${key}: cleanup ${failed ? 'stopped with an error' : 'done'}`)
+      if (this.queued(key) === 0 && !row.pinned) {
+        await this.close(key, 'idle', false)
+        return
+      }
+    }
     if (this.restartPending(key)) {
       await this.restartNow(key, 'pending restart, its turn ended')
       return
@@ -1145,6 +1198,14 @@ export class Hub {
   }
 
   async onPermissionRequest(key: string, m: Extract<ClientMsg, { t: 'permission_request' }>): Promise<void> {
+    const l = this.live.get(key)
+    if (l?.cleaning && l.conn) {
+      // A cleanup job runs unattended, as with bypassPermissions: its prompts are allowed, and logged.
+      l.conn.send({ t: 'permission', request_id: m.request_id, behavior: 'allow' })
+      const what = redact(m.input_preview.replace(/\s+/g, ' ').trim()).slice(0, 300)
+      log('perm', `${key}: cleanup — allowed ${m.tool_name}${m.description ? ` (${m.description})` : ''}${what ? `: ${what}` : ''}`)
+      return
+    }
     const thread = this.activeThreadOf(key)
     const code = m.request_id.toLowerCase()
     if (this.desk.get(code)) return
@@ -1415,6 +1476,7 @@ export class Hub {
     }
     const views = this.store.sessions().filter(s => isLive(s.status)).map(s => this.reapView(s))
     for (const key of dueForIdleClose(views, now, v => this.idleMinutesFor(v))) await this.close(key, 'idle')
+    await this.cleanupDue(now)
     // A resting provider's time ran out (or a chain changed): sessions go back to the workspace's first choice.
     await this.rebalanceProviders()
     await this.pump()
@@ -1466,7 +1528,7 @@ export class Hub {
     for (const s of this.store.sessions()) {
       const l = this.live.get(s.key)
       if (!l || this.desk.count(s.key) > 0 || this.held(s.key)) continue
-      if (s.status !== 'busy' || !l.ready || !l.conn) continue
+      if (s.status !== 'busy' || !l.ready || !l.conn || l.cleaning) continue
       const t = this.activeThreadOf(s.key)
       // A draft thread (a scheduled run's) has no post yet to show it under.
       if (!t || done.has(t.id) || isDraft(t.id)) continue

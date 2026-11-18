@@ -23,7 +23,7 @@ A workspace is a folder `<workspacesDir>/<name>/` (default `~/claude-workspaces`
 
 | path | what |
 | --- | --- |
-| `workspace.json` | `{name, description, baseRef?, repos:[{name,path}], routerModel?, workerModel?, workerPermissionMode?, idleMinutes?:{router,worker}, providers?:[…], acceptFrom?:[…], trigger?}` |
+| `workspace.json` | `{name, description, baseRef?, repos:[{name,path}], routerModel?, workerModel?, workerPermissionMode?, idleMinutes?:{router,worker}, cleanupHours?, providers?:[…], acceptFrom?:[…], trigger?}` |
 | `CLAUDE.md` | instructions every session in the workspace loads |
 | `ROUTER.md` | optional: this workspace's router persona, i.e. how its routers work with people (else config.json `routerPersona`, else the built-in project manager) |
 | `knowledge/` | shared notes: routers read them, workers add to them |
@@ -56,7 +56,9 @@ Arguments passed: `$ARGUMENTS`
   A local path is used in place (workers still get their own worktrees); a URL is cloned
   into `repos/`. **`repo rm <workspace> <name>`**: `mmhub repo rm` (files untouched).
 - **`set <workspace> <key> <value>`**: edit `workspace.json` — `routerModel`, `workerModel`,
-  `workerPermissionMode`, `idleMinutes.router`, `idleMinutes.worker`, `baseRef`, `description`,
+  `workerPermissionMode`, `idleMinutes.router`, `idleMinutes.worker`, `cleanupHours` (hours
+  without work before a worker cleans up its processes, containers, images and build output;
+  0 = never), `baseRef`, `description`,
   `acceptFrom`, `trigger`. Read, change, write (2-space JSON). New and resumed sessions pick it up.
 - **`trigger <workspace> openrouter`**: like `laya` below (follow, unfollow, `TRIGGER.md`,
   the two-person rule), but a hosted model judges, through OpenRouter: no GPU, any
