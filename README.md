@@ -187,10 +187,11 @@ talking to them. When it is sure (`ruleThreshold`, 0.85), the reply isn't for th
 even in a thread where the person has mostly talked to the bot. A reply that only names
 someone ("summarize what @devbot said") scores lower, and the main question decides.
 
-Laya is also asked whether the reply is just a greeting, or thanks. A greeting
-("hi all", "selamat pagi") isn't for the bot. Thanks are for whoever wrote the post before
-it: they reach the bot only after the bot's own post. Laya is sure of these at
-`kindThreshold` (0.7), and both come before the `TRIGGER.md` rules. English greetings and
+Laya is also asked whether the reply is just a greeting, or thanks. Both are for whoever
+wrote the post before it: a greeting ("hi", "selamat pagi") or thanks reaches the bot only
+right after the bot's own post. A greeting that @mentions the bot, or in a thread of only
+the bot and that person, always reaches it, as any such reply does. Laya is sure of these
+at `kindThreshold` (0.7), and both come before the `TRIGGER.md` rules. English greetings and
 thanks are recognised reliably. Indonesian thanks ("makasih", "terima kasih") score only
 about 0.5, so for them the rules and the main question decide.
 

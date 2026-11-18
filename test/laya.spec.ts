@@ -179,15 +179,16 @@ describe('the decision', () => {
     expect(decide(ans(0.6), rules, cfg, 'hubbot', m)).toMatchObject({ yes: true })
   })
 
-  test('sure it is thanks: for the bot only after its own post. Sure it is just a greeting: not for the bot. Before the rules', () => {
+  test('sure it is a greeting or thanks: for the bot only after its own post. Before the rules', () => {
     const kind = (greeting: number, thanks: number) => ({ greeting: { probabilities: { greeting, other: 1 - greeting } }, thanks: { probabilities: { thanks, other: 1 - thanks } } })
     const bot = { user: 'hubbot', bot: true }, alice = { user: 'alice' }
     expect(decide({ ...ans(0.2, { no1: 0.99 }), ...kind(0.5, 0.95) }, rules, cfg, 'hubbot', [], bot)).toEqual({ yes: true, p: 0.95, why: 'thanks, for the post before it (@hubbot)' })
     expect(decide({ ...ans(0.9, { yes0: 0.99 }), ...kind(0.5, 0.95) }, rules, cfg, 'hubbot', [], alice)).toEqual({ yes: false, p: 0.95, why: 'thanks, for the post before it (@alice)' })
     expect(decide({ ...ans(0.9), ...kind(0.5, 0.95) }, rules, cfg, 'hubbot')).toMatchObject({ yes: false, why: 'thanks, for the post before it (nobody)' })
-    expect(decide({ ...ans(0.9, { yes0: 0.99 }), ...kind(0.8, 0.5) }, rules, cfg, 'hubbot', [], bot)).toEqual({ yes: false, p: 0.8, why: 'just a greeting, in a thread of more than two' })
+    expect(decide({ ...ans(0.2, { no1: 0.99 }), ...kind(0.8, 0.5) }, rules, cfg, 'hubbot', [], bot)).toEqual({ yes: true, p: 0.8, why: 'a greeting, for the post before it (@hubbot)' })
+    expect(decide({ ...ans(0.9, { yes0: 0.99 }), ...kind(0.8, 0.5) }, rules, cfg, 'hubbot', [], alice)).toEqual({ yes: false, p: 0.8, why: 'a greeting, for the post before it (@alice)' })
     // Sure of both: the likelier. Neither sure: as before.
-    expect(decide({ ...ans(0.9), ...kind(0.93, 0.74) }, rules, cfg, 'hubbot', [], bot)).toMatchObject({ yes: false, why: 'just a greeting, in a thread of more than two' })
+    expect(decide({ ...ans(0.9), ...kind(0.93, 0.74) }, rules, cfg, 'hubbot', [], alice)).toMatchObject({ yes: false, why: 'a greeting, for the post before it (@alice)' })
     expect(decide({ ...ans(0.1), ...kind(0.73, 0.77) }, rules, cfg, 'hubbot', [], bot)).toMatchObject({ yes: true, p: 0.77 })
     expect(decide({ ...ans(0.6), ...kind(0.69, 0.69) }, rules, cfg, 'hubbot', [], alice)).toEqual({ yes: true, p: 0.6, why: 'its own reading' })
     // Talking to someone it @mentions still comes first.

@@ -338,9 +338,10 @@ export type Verdict = { yes: boolean; p: number; why: string }
 
 /**
  * The decision from Laya's answers: not for the bot when it is sure the post talks to
- * someone it @mentions. Sure it is thanks: for the bot when `previous` (who wrote the
- * post before) is the bot. Sure it is just a greeting: not for the bot. Then a sure
- * "don't answer" rule, a sure "answer" rule, and last the base question.
+ * someone it @mentions. Sure it is a greeting or thanks: for the bot when `previous`
+ * (who wrote the post before) is the bot. Then a sure "don't answer" rule, a sure
+ * "answer" rule, and last the base question. (A greeting that @mentions the bot, or in
+ * a thread of only the bot and its author, reaches the bot before any of this.)
  */
 export function decide(answers: Answers, rules: TriggerRules, cfg: Pick<LayaConfig, 'threshold' | 'ruleThreshold' | 'kindThreshold'>, bot: string, mentioned: Person[] = [], previous?: Person): Verdict {
   const p = (k: string, opt: string) => answers[k]?.probabilities?.[opt]
@@ -362,14 +363,14 @@ export function decide(answers: Answers, rules: TriggerRules, cfg: Pick<LayaConf
     if (typeof q === 'number' && q >= cfg.ruleThreshold && (!other || q > other.p)) other = { i, p: q }
   })
   if (other) return { yes: false, p: other.p, why: `talking to @${clip(to[other.i]!.user, 40)}` }
-  // Sure of both (a greeting can read as thanks, and back): the likelier one.
+  // A greeting or thanks is for whoever wrote the post before it. Sure of both (a greeting can read as thanks, and back): the likelier one.
   const kind = (k: 'greeting' | 'thanks') => { const q = p(k, k); return typeof q === 'number' && q >= cfg.kindThreshold ? q : 0 }
   const greeting = kind('greeting'), thanks = kind('thanks')
-  if (thanks && thanks >= greeting) {
+  if (thanks || greeting) {
     const to = previous ? `@${clip(previous.user, 40)}` : 'nobody'
-    return { yes: previous?.user === bot, p: thanks, why: `thanks, for the post before it (${to})` }
+    const isThanks = thanks >= greeting
+    return { yes: previous?.user === bot, p: isThanks ? thanks : greeting, why: `${isThanks ? 'thanks' : 'a greeting'}, for the post before it (${to})` }
   }
-  if (greeting) return { yes: false, p: greeting, why: 'just a greeting, in a thread of more than two' }
   const no = sure('no', r.ignore)
   if (no) return { yes: false, p: no.p, why: `don't-answer rule "${clip(r.ignore[no.i]!, 40)}"` }
   const yes = sure('yes', r.answer)

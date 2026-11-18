@@ -157,8 +157,8 @@ The assistant is @${bot} (also called Claude, the bot or the AI). The others in 
 You get the thread: who is in it, the earlier messages oldest first, and the newest message, marked ">>". Decide who the newest message is talking to:
 - @${bot}: a question, request or answer addressed to it, or a reply to what it just said.
 - someone else in the thread: it answers them, asks or tells them something, or @mentions them.
-- ${NOBODY}: chatter, news, a remark to everyone, or just a greeting.
-Thanks are for whoever wrote the message before it. Messages may be in any language.
+- ${NOBODY}: chatter, news or a remark to everyone.
+A greeting or thanks is for whoever wrote the message before it. Messages may be in any language.
 The workspace's rules correct your reading. When one clearly describes the newest message, set "rule" to "answer" or "ignore" ("ignore" wins when both apply); otherwise "none".
 "confidence" is how sure you are of "to", from 0 to 1. Reply with the JSON object only.`
 }
