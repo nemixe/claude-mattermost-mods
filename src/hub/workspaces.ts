@@ -60,6 +60,11 @@ export type Workspace = WorkspaceManifest & { dir: string }
 export const WORKSPACE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 const REPO_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 
+/** A person's own workspace (DMs, config personalWorkspaces): named from their user id, which never changes. */
+export function personalName(userId: string): string {
+  return `personal-${userId}`
+}
+
 export function validName(name: string): boolean {
   return WORKSPACE_NAME_RE.test(name) && !name.includes('..') && name !== TEMPLATE_DIR
 }

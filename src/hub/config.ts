@@ -56,6 +56,11 @@ export type HubConfig = {
    * and dependencies from its worktrees. 0 = never.
    */
   cleanupHours: number
+  /**
+   * A DM from a chat not connected to a workspace gets the person a workspace of their
+   * own, personal-<user id>, instead of the "which workspace?" question. Default true.
+   */
+  personalWorkspaces: boolean
   /** Minutes without a hook event before a busy worker is flagged. */
   busyWatchdogMinutes: number
   claudeBin?: string
@@ -114,6 +119,7 @@ export const DEFAULT_CONFIG: HubConfig = {
   workerReports: 'router',
   announceClose: false,
   cleanupHours: 24,
+  personalWorkspaces: true,
   busyWatchdogMinutes: 30,
   disablePlugins: [],
   tmuxSocket: 'mmhub',
@@ -135,6 +141,7 @@ export function loadConfig(file: string): HubConfig {
     trigger: isTrigger(raw.trigger) ? raw.trigger : 'mention',
     unfollowAfter: typeof raw.unfollowAfter === 'number' && raw.unfollowAfter >= 0 ? Math.floor(raw.unfollowAfter) : DEFAULT_CONFIG.unfollowAfter,
     cleanupHours: hours(raw.cleanupHours) ?? DEFAULT_CONFIG.cleanupHours,
+    personalWorkspaces: raw.personalWorkspaces !== false,
     laya: { ...DEFAULT_LAYA, ...(raw.laya ?? {}) },
     openrouter: { ...DEFAULT_OPENROUTER, ...(raw.openrouter ?? {}) },
   }

@@ -89,6 +89,13 @@ the `/mm` panel. The CLI is `bun ~/claude-mattermost-mods/bin/mmhub` (alias it t
   reply, or while it waits for a 🔐 answer or an API-error retry.
 - Worker permission prompts appear as 🔐 posts: owners reply `yes abcde` / `no abcde`
   or react ✅ / ❌. Pre-approve common commands in the workspace's `.claude/settings.json`.
+- **DM the bot** → your own workspace. The first DM from a chat that isn't connected to a
+  workspace creates `personal-<your user id>` from the [template](#workspace-template),
+  binds the chat to it and starts the thread there, without asking "which workspace?".
+  Later DMs go to the same workspace; add repos to it like to any other
+  (`mmhub repo add personal-<id> …`). A chat bound to another workspace stays there
+  (`mmhub ws bind <ws> <dm-channel-id>`). `personalWorkspaces: false` in `config.json`
+  brings back the question.
 - `@claude every weekday at 9, check the alerts dashboard and post anything red` (an
   owner) → a scheduled job; each run opens its own thread ([Scheduled jobs](#scheduled-jobs)).
 - Owner commands: `!ws`, `!workers`, `!wake [id]`, `!stop`, `!restart [id|all|workers|routers] [now]`,
@@ -315,14 +322,23 @@ A router or worker can ask another workspace, through that workspace's router:
   to its workers. Whatever that workspace's sessions post in the thread goes back to the
   asker: a router gets it as a message, a worker as work for the thread it was busy on.
   Follow-ups use `request_id`. Everything stays visible in the channel.
-- `send_dm(user, text)` DMs an **owner** (`access.json` `allowFrom`) from the bot; the
-  owner's replies in that DM thread go back to the session. Others can't be DMed: the
-  hub takes DM replies from owners only. With `"*"` in `allowFrom`, any person can be DMed.
+- `send_dm(user, text)` asks a person **privately**, agent to agent. Only routers can: a
+  worker reports the question to its thread's router. The hub hands the question to a
+  new router in the person's own workspace (`personal-<user id>`, created and bound to
+  their DM with the bot if needed), not to the person. That router asks them in the DM
+  in its own words (its first post opens the thread), talks it through, and sends back
+  what was asked with `answer_request(text)`. The asker gets it as a `dm_reply` message;
+  it never sees the DM itself, and the person's agent leaves out what they didn't mean
+  to share. Follow-ups use the `thread_id` the asker was given. Only **owners**
+  (`access.json` `allowFrom`) can be asked; with `"*"` in `allowFrom`, any person (never
+  a bot). With `personalWorkspaces: false` in `config.json`, `send_dm` DMs the owner
+  directly from the bot, and their replies in that DM thread go back to the router.
 - `list_workspaces` shows the other workspaces, which of them take requests, and the
-  session's open requests and DMs.
+  session's open requests, DMs and private questions.
 
 Guards: a workspace takes requests from every workspace unless its `workspace.json` sets
-`acceptFrom` (`["ops", "web"]`; `[]` takes none). A request never goes back into a
+`acceptFrom` (`["ops", "web"]`; `[]` takes none); a personal workspace's `acceptFrom`
+limits who may ask its person privately. A request never goes back into a
 workspace it came through, and passes through at most two workspaces. Each session opens
 at most 10 requests or DMs an hour, and each one carries at most 60 messages. Running
 sessions get these tools at `mmhub session restart all`.
@@ -462,7 +478,9 @@ launch files), `providers.json` and `providers/<name>/` (provider logins and sec
 `workerArgs`, `workerPermissionMode` (`acceptEdits`), `workerReports` (`router`: workers report
 to the router; `thread`: they post in the thread), `idleMinutes` (`{router:30, worker:120}`,
 0 = never), `maxLiveRouters` (6), `maxLiveWorkers` (4), `maxWorkersPerWorkspace` (6),
-`announceClose`, `cleanupHours` (24: a worker with no work this long cleans up after
+`announceClose`, `personalWorkspaces` (true: a DM from a chat without a workspace gets
+the person their own, `personal-<user id>`; false: the "which workspace?" question),
+`cleanupHours` (24: a worker with no work this long cleans up after
 itself, see [Lifecycle](#lifecycle); 0 = never), `busyWatchdogMinutes` (30), `routerAutocompact`, `claudeBin`, `bunBin`,
 `gitBin`, `path`, `tmuxSocket` (`mmhub`), `providers` (`["default"]`),
 `providerCooldownMinutes` (`{auth:60, quota:60, rate_limit:10, errors:15, channels:360}`),
@@ -566,7 +584,7 @@ a note telling the session to check what it already did:
 | the process crashed or was killed (`kill -9`, OOM) | noticed within seconds (its bridge drops and the tmux session is gone); resumes it (`--resume`) and re-delivers, without a post. At most 2 automatic restarts per 10 min, then `failed` and a ⚠️ post |
 | the machine restarted / sessions died while the hub was down | at `mmhub start`: resume and re-deliver, without a post |
 | the hub restarted while a turn ran | the session is adopted; the turn's Stop hook is checked against the screen |
-| the turn ended with text but posted nothing (it wrote its answer in its terminal instead of calling `reply`) | its Stop hook sends the turn back once ("Nothing was posted this turn…"), so it posts it; a turn that reached someone (`reply`, `react`, `edit_message`, `delegate`, `message_workspace`, `send_dm`, `unfollow`) or ended without text isn't |
+| the turn ended with text but posted nothing (it wrote its answer in its terminal instead of calling `reply`) | its Stop hook sends the turn back once ("Nothing was posted this turn…"), so it posts it; a turn that reached someone (`reply`, `react`, `edit_message`, `delegate`, `message_workspace`, `send_dm`, `answer_request`, `unfollow`) or ended without text isn't |
 | the turn ended with an API error (StopFailure) | overloaded / 5xx / network: retry after 20 s, 1 m, 3 m, 10 m (a ⚠️ post only from the third try). Rate limit: 5 m, 15 m, 30 m, then hourly (≈5 h), with one ⏸ post. Output limit: once, quietly. Invalid request: no retry, a ⚠️ post. Sign-in, usage/credit limits, rate limits, and errors that outlast these retries move the work to the workspace's next provider when it has one ([above](#providers-and-fallback)); otherwise sign-in errors aren't retried (a ⚠️ post) and usage limits wait like rate limits. New work for it waits for the retry; `!wake <id>` retries now |
 | an owner stopped it (`Stop`, `!stop`, `!worker stop`) | it stays stopped: its unfinished work waits for the next message, delegate or wake |
 

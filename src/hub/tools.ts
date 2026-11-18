@@ -12,7 +12,7 @@ import type { Hub } from './hub'
 import { isLive } from './lifecycle'
 import { loadTrigger, MAX_RULES, RULE_MAX_CHARS, saveTrigger, triggerFile, usableRules } from './laya'
 import { listSchedulesTool, scheduleTool, unscheduleTool } from './jobs'
-import { forwardAnswer, linkedTo, listWorkspacesText, messageWorkspace, sendDM } from './links'
+import { answerRequest, forwardAnswer, linkedTo, listWorkspacesText, messageWorkspace, sendDM } from './links'
 import { inDM, setFollowing } from './trigger'
 import type { MMPost } from './mattermost'
 import { isDraft, type ThreadRow } from './store'
@@ -333,7 +333,7 @@ export async function queueTask(hub: Hub, key: string, thread: ThreadRow, text: 
 
 /** Run one tool call for session `key`. Returns the text shown to the model. */
 /** Tools that reach someone: a post, a reaction, a worker, another workspace, an owner, or leaving a thread. */
-const REACHES = new Set(['reply', 'react', 'edit_message', 'delegate', 'message_workspace', 'send_dm', 'unfollow'])
+const REACHES = new Set(['reply', 'react', 'edit_message', 'delegate', 'message_workspace', 'send_dm', 'answer_request', 'unfollow'])
 
 export async function handleCall(hub: Hub, key: string, tool: string, a: Args): Promise<string> {
   const text = await callTool(hub, key, tool, a)
@@ -394,6 +394,8 @@ async function callTool(hub: Hub, key: string, tool: string, a: Args): Promise<s
       })
     case 'send_dm':
       return sendDM(hub, key, { user: str(a, 'user', false), text: str(a, 'text')!, threadId: str(a, 'thread_id', false) })
+    case 'answer_request':
+      return answerRequest(hub, key, { text: str(a, 'text')! })
     case 'schedule':
       return scheduleTool(hub, key, {
         schedule: str(a, 'schedule')!,

@@ -69,6 +69,7 @@ Read, change one key, write back pretty-printed (2 spaces). Keys:
 | `idleMinutes.router` / `idleMinutes.worker` | minutes idle before a session auto-closes (defaults 30 / 120; `0` = never) |
 | `maxLiveRouters` / `maxLiveWorkers` / `maxWorkersPerWorkspace` | caps (6 / 4 / 6) |
 | `announceClose` | `true` posts "💤 closed after Nm idle" in the thread |
+| `personalWorkspaces` | `true` (default): a DM from a chat without a workspace creates `personal-<user id>` for that person and binds the chat to it; `false`: the hub asks "which workspace?" instead. It also decides `send_dm`: on, a router's private question goes to the person's own agent, which asks them in their DM and sends the answer back; off, the bot DMs the owner directly |
 | `cleanupHours` | hours a worker may go without work before its own session cleans up: stops processes it left running, removes its Docker containers and images, deletes build output and `node_modules` in its worktrees, its permission prompts allowed as with `bypassPermissions` and logged (default 24; `0` = never; a workspace's `workspace.json` can override it) |
 | `workspacesDir` | where workspaces live (default `~/claude-workspaces`); afterwards run `mmhub ws template` to create `<workspacesDir>/workspace-template/`, the folder new workspaces are copied from |
 | `routerAutocompact` | token window for router auto-compaction |

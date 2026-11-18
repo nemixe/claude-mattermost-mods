@@ -38,7 +38,7 @@ import { buildSnapshot, StatusWriter } from './status'
 import { isDraft, Store, type MessageRow, type SessionRow, type TaskRow, type ThreadRow, type WorkerRow } from './store'
 import { Ticker } from './ticker'
 import type { Tmux } from './tmux'
-import { effective, ensureTemplate, externalRepoPaths, listWorkspaces, loadBindings, loadWorkspace, workerDir, type Workspace } from './workspaces'
+import { bindChannel, createWorkspace, effective, ensureTemplate, externalRepoPaths, listWorkspaces, loadBindings, loadWorkspace, personalName, workerDir, type Workspace } from './workspaces'
 
 export type BridgeConn = { send: (m: HubMsg) => void; end: () => void; role: Role; pid: number }
 
@@ -1298,6 +1298,7 @@ export class Hub {
       case 'command':
         return runCommand(this, a, post)
       case 'ask_workspace':
+        if (channelType === 'D' && this.cfg.personalWorkspaces) return this.startPersonal(a.threadId, post)
         return askWorkspace(this, post, channelType)
       case 'workspace_answer':
         return answerWorkspace(this, a.text, post)
@@ -1346,6 +1347,42 @@ export class Hub {
   }
 
   /** A new hub thread: its router is created and gets the first message. */
+  /**
+   * A DM from a chat not connected to a workspace (config personalWorkspaces, on by
+   * default): the person gets a workspace of their own, personal-<user id>, created from
+   * the template the first time and reused after; the chat is bound to it and the
+   * thread starts there, without the "which workspace?" question. Call on the chain.
+   */
+  async startPersonal(threadId: string, post: MMPost): Promise<void> {
+    let w: Workspace
+    try {
+      w = await this.personalWorkspace(post.user_id)
+    } catch (err) {
+      await this.replyTo(post, `⚠️ Couldn't create your personal workspace \`${personalName(post.user_id)}\`: ${errMsg(err)}`)
+      return
+    }
+    bindChannel(this.p.bindings, post.channel_id, w.name)
+    this.status.changed()
+    await this.startThread(w, threadId, post)
+  }
+
+  /** A person's own workspace, personal-<user id>: created from the template the first time. Throws when it can't be. */
+  async personalWorkspace(userId: string): Promise<Workspace> {
+    const name = personalName(userId)
+    const have = this.ws(name)
+    if (have) return have
+    const user = await this.mm.username(userId)
+    try {
+      const w = createWorkspace(this.cfg, name, `Personal workspace of @${user}`)
+      log('hub', `created personal workspace ${name} for @${user}`)
+      this.status.changed()
+      return w
+    } catch (err) {
+      log('hub', `personal workspace ${name} for @${user}: ${errMsg(err)}`)
+      throw err
+    }
+  }
+
   async startThread(w: Workspace, threadId: string, post: MMPost): Promise<void> {
     const label = post.message.replace(/@[\w.-]+/g, '').replace(/\s+/g, ' ').trim().slice(0, 60) || 'thread'
     this.createRouter({ threadId, channelId: post.channel_id, workspace: w, label })

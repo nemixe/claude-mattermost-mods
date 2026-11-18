@@ -21,7 +21,7 @@ import { RETRY_DELAYS } from '../src/hub/lifecycle'
 import type { Mattermost, MMPost } from '../src/hub/mattermost'
 import { tmuxName, transcriptPath } from '../src/hub/spawn'
 import type { Tmux } from '../src/hub/tmux'
-import { bindChannel, createWorkspace, setWorkspaceProviders, setWorkspaceTrigger, type Workspace } from '../src/hub/workspaces'
+import { bindChannel, createWorkspace, loadBindings, loadWorkspace, setWorkspaceProviders, setWorkspaceTrigger, type Workspace } from '../src/hub/workspaces'
 import { saveProviders, secretFile, writeSecret } from '../src/hub/providers'
 
 const T = 30_000
@@ -760,50 +760,153 @@ describe('cross-workspace requests and DMs', () => {
     await expect(handleCall(hub, key, 'message_workspace', { request_id: 'p1', text: 'x' })).rejects.toThrow('reached 60 messages')
   }, T)
 
-  test('a worker DMs an owner; their reply in that DM thread comes back to it', async () => {
-    const { hub, posts, key, wb } = await scene(dir => {
+  /** A router of demo for thread T3, running. */
+  async function askingRouter(hub: Hub, tmux: FakeTmux, w: Workspace, launch: number) {
+    const rkey = hub.createRouter({ threadId: 'T3', channelId: 'C1', workspace: w, label: 'deploy plan' })
+    await hub.enqueue(() => hub.ensureStarted(rkey))
+    return { rkey, rb: await connect(hub, tmux, rkey, launch) }
+  }
+
+  test("a private question goes through the person's own agent: it asks them in a DM and sends their answer back", async () => {
+    const { hub, tmux, w, p, posts, key } = await scene(dir => {
       writeFileSync(join(dir, 'access.json'), JSON.stringify({ dmPolicy: 'allowlist', allowFrom: ['U1'], channels: {}, pending: {} }))
     })
-    const res = await handleCall(hub, key, 'send_dm', { user: '@alice', text: 'May I deploy to staging?' })
+    const { rkey, rb } = await askingRouter(hub, tmux, w, 2)
+
+    // Routers only: a worker reports the question to its router instead.
+    await expect(handleCall(hub, key, 'send_dm', { user: 'alice', text: 'May I deploy?' })).rejects.toThrow('only routers ask people privately')
+
+    const res = await handleCall(hub, rkey, 'send_dm', { user: '@alice', text: 'May I deploy to staging today?' })
+    const draft = /thread_id (draft-\w+)/.exec(res)![1]!
+    expect(res).toContain("asked @alice's own agent (workspace personal-U1)")
+    expect(posts).toEqual([]) // the hub posts nothing: her agent asks in its own words
+    expect(loadBindings(p.bindings)['D1']).toBe('personal-U1')
+    const t = hub.store.thread(draft)!
+    expect(t).toMatchObject({ channelId: 'D1', workspace: 'personal-U1' })
+    expect(hub.store.link(draft)).toMatchObject({ kind: 'personal', fromKey: rkey, peer: 'U1', fromThread: 'T3' })
+
+    // Her agent gets the question, asks her in the DM (its first reply opens the thread) ...
+    const ab = await connect(hub, tmux, t.routerKey, 3)
+    expect(ab.got[0]!.meta).toMatchObject({ kind: 'dm_request', from_workspace: 'demo' })
+    expect(ab.got[0]!.content).toContain('[Private question from workspace "demo"')
+    expect(ab.got[0]!.content).toContain('May I deploy to staging today?')
+    await handleCall(hub, t.routerKey, 'reply', { text: 'Hi Alice, the deploy-plan thread in demo asks: may it deploy to staging today?' })
+    const root = posts[0]!.id
+    expect(posts[0]).toMatchObject({ channel_id: 'D1' })
+    expect(hub.store.link(root)).toMatchObject({ kind: 'personal', fromKey: rkey })
+    expect(rb.got.length).toBe(0) // the question to her doesn't go back to the asker
+
+    // ... she answers there: it reaches her agent, not the asker, which can't read the DM either.
+    const reply = { id: 'R1', root_id: root, user_id: 'U1', channel_id: 'D1', message: 'Yes, after 3pm.', create_at: Date.now() } as MMPost
+    await hub.enqueue(() => hub.onPosted(reply, 'D'))
+    await until('her answer reaches her agent', () => ab.got.length === 2)
+    expect(ab.got[1]!.content).toContain('Yes, after 3pm.')
+    expect(rb.got.length).toBe(0)
+    await expect(handleCall(hub, rkey, 'fetch_thread', { thread_id: root })).rejects.toThrow()
+
+    // Her agent sends back what was asked.
+    expect(await handleCall(hub, t.routerKey, 'answer_request', { text: 'Yes, after 3pm today.' })).toContain('sent back to workspace demo')
+    await until('the answer reaches the asker', () => rb.got.length === 1)
+    expect(rb.got[0]!.meta).toMatchObject({ kind: 'dm_reply', user: 'alice' })
+    expect(rb.got[0]!.content).toContain("[Answer from @alice's own agent (workspace personal-U1)")
+    expect(rb.got[0]!.content).toContain('Yes, after 3pm today.')
+
+    // The asker asks more, by the id it was given: her agent gets it.
+    await handleCall(hub, rkey, 'send_dm', { thread_id: draft, text: 'Which branch?' })
+    await until('the follow-up reaches her agent', () => ab.got.length === 3)
+    expect(ab.got[2]!.content).toContain('[Follow-up from workspace "demo"')
+    // answer_request only answers a private question.
+    await expect(handleCall(hub, rkey, 'answer_request', { text: 'x' })).rejects.toThrow('no private question')
+  }, T)
+
+  test('with personalWorkspaces false a router DMs an owner directly, and their reply comes back', async () => {
+    const { hub, tmux, w, posts } = await scene(dir => {
+      writeFileSync(join(dir, 'access.json'), JSON.stringify({ dmPolicy: 'allowlist', allowFrom: ['U1'], channels: {}, pending: {} }))
+      writeFileSync(join(dir, 'config.json'), JSON.stringify({ ...JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8')), personalWorkspaces: false }))
+    })
+    const { rkey, rb } = await askingRouter(hub, tmux, w, 2)
+    const res = await handleCall(hub, rkey, 'send_dm', { user: '@alice', text: 'May I deploy to staging?' })
     expect(res).toContain('DM thread_id p1')
     expect(posts[0]).toMatchObject({ id: 'p1', channel_id: 'D1' })
     expect(posts[0]!.message).toContain('May I deploy to staging?')
-    expect(hub.store.link('p1')).toMatchObject({ kind: 'dm', fromKey: key, peer: 'U1', fromThread: 'T1' })
+    expect(hub.store.link('p1')).toMatchObject({ kind: 'dm', fromKey: rkey, peer: 'U1', fromThread: 'T3' })
     expect(hub.store.get('seen:D1')).toBeDefined()
 
     // Owners only.
-    await expect(handleCall(hub, key, 'send_dm', { user: 'bob', text: 'hi' })).rejects.toThrow('@bob is not a hub owner')
+    await expect(handleCall(hub, rkey, 'send_dm', { user: 'bob', text: 'hi' })).rejects.toThrow('@bob is not a hub owner')
 
-    // alice answers in the thread: the worker gets it as work for T1.
+    // alice answers in the thread: the router gets it.
     const reply = { id: 'R1', root_id: 'p1', user_id: 'U1', channel_id: 'D1', message: 'Go ahead.', create_at: Date.now() } as MMPost
     await hub.enqueue(() => hub.onPosted(reply, 'D'))
-    await until('the DM reply reaches the worker', () => wb.got.length === 2)
-    expect(wb.got[1]!.content).toContain('[DM reply from @alice')
-    expect(wb.got[1]!.content).toContain('Go ahead.')
+    await until('the DM reply reaches the router', () => rb.got.length === 1)
+    expect(rb.got[0]!.content).toContain('[DM reply from @alice')
+    expect(rb.got[0]!.content).toContain('Go ahead.')
 
-    // The worker answers in the same DM thread.
-    await handleCall(hub, key, 'send_dm', { thread_id: 'p1', text: 'Thanks, deploying.' })
+    // The router answers in the same DM thread.
+    await handleCall(hub, rkey, 'send_dm', { thread_id: 'p1', text: 'Thanks, deploying.' })
     expect(posts.at(-1)).toMatchObject({ root_id: 'p1', channel_id: 'D1', message: 'Thanks, deploying.' })
-    await expect(handleCall(hub, key, 'send_dm', { thread_id: 'T1', text: 'x' })).rejects.toThrow("isn't one of yours")
+    await expect(handleCall(hub, rkey, 'send_dm', { thread_id: 'T1', text: 'x' })).rejects.toThrow("isn't one of yours")
 
     // At most 10 new requests or DMs an hour.
-    for (let i = 0; i < 9; i++) hub.store.insertLink({ threadId: `X${i}`, kind: 'dm', channelId: 'D1', fromKey: key, fromWorkspace: 'demo', peer: 'U1', chain: ['demo'], createdAt: Date.now() })
-    await expect(handleCall(hub, key, 'send_dm', { user: 'alice', text: 'again' })).rejects.toThrow('in the last hour')
+    for (let i = 0; i < 9; i++) hub.store.insertLink({ threadId: `X${i}`, kind: 'dm', channelId: 'D1', fromKey: rkey, fromWorkspace: 'demo', peer: 'U1', chain: ['demo'], createdAt: Date.now() })
+    await expect(handleCall(hub, rkey, 'send_dm', { user: 'alice', text: 'again' })).rejects.toThrow('in the last hour')
   }, T)
 
-  test('with "*" in allowFrom a worker DMs any person, never a bot', async () => {
-    const { hub, posts, key } = await scene(dir => {
+  test('with "*" in allowFrom a router asks any person privately, never a bot', async () => {
+    const { hub, tmux, w } = await scene(dir => {
       writeFileSync(join(dir, 'access.json'), JSON.stringify({ dmPolicy: 'allowlist', allowFrom: ['*'], channels: {}, pending: {} }))
     })
+    const { rkey } = await askingRouter(hub, tmux, w, 2)
     const people: Record<string, { id: string; username: string; is_bot?: boolean }> = {
       dave: { id: 'U9', username: 'dave' }, devbot: { id: 'UBOT', username: 'devbot', is_bot: true }, claude: { id: 'BOT', username: 'claude' },
     }
     ;(hub.mm as unknown as { userByName: (n: string) => Promise<unknown> }).userByName = async n => people[n]
-    expect(await handleCall(hub, key, 'send_dm', { user: '@dave', text: 'Can you check the build?' })).toContain('sent to @dave')
-    expect(hub.store.link(posts[0]!.id)).toMatchObject({ kind: 'dm', peer: 'U9' })
-    await expect(handleCall(hub, key, 'send_dm', { user: 'devbot', text: 'x' })).rejects.toThrow('not a person')
-    await expect(handleCall(hub, key, 'send_dm', { user: 'claude', text: 'x' })).rejects.toThrow('not a person')
-    await expect(handleCall(hub, key, 'send_dm', { user: 'nobody', text: 'x' })).rejects.toThrow('not a person')
+    const res = await handleCall(hub, rkey, 'send_dm', { user: '@dave', text: 'Can you check the build?' })
+    expect(res).toContain("asked @dave's own agent (workspace personal-U9)")
+    expect(hub.store.link(/thread_id (draft-\w+)/.exec(res)![1]!)).toMatchObject({ kind: 'personal', peer: 'U9' })
+    await expect(handleCall(hub, rkey, 'send_dm', { user: 'devbot', text: 'x' })).rejects.toThrow('not a person')
+    await expect(handleCall(hub, rkey, 'send_dm', { user: 'claude', text: 'x' })).rejects.toThrow('not a person')
+    await expect(handleCall(hub, rkey, 'send_dm', { user: 'nobody', text: 'x' })).rejects.toThrow('not a person')
+  }, T)
+})
+
+describe('personal workspaces', () => {
+  const owners = (dir: string) => writeFileSync(join(dir, 'access.json'), JSON.stringify({ dmPolicy: 'allowlist', allowFrom: ['U1', 'U2'], channels: {}, pending: {} }))
+  const dm = (hub: Hub, user: string, chat: string, id: string, message: string) =>
+    hub.enqueue(() => hub.onPosted({ id, root_id: '', user_id: user, channel_id: chat, message, create_at: Date.now() } as MMPost, 'D'))
+
+  test("a DM from a chat without a workspace starts in the person's own, made once and named from their user id", async () => {
+    const { hub, p, posts } = setup({}, owners)
+    hub.bot = { id: 'BOT', username: 'hubbot' }
+    await dm(hub, 'U1', 'D1', 'DM1', 'can you check the build?')
+    expect(posts).toEqual([]) // no "which workspace?"
+    expect(hub.store.thread('DM1')).toMatchObject({ channelId: 'D1', workspace: 'personal-U1' })
+    expect(loadBindings(p.bindings)['D1']).toBe('personal-U1')
+    expect(loadWorkspace(hub.cfg, 'personal-U1')).toMatchObject({ description: 'Personal workspace of @alice', repos: [] })
+    expect(hub.queued(hub.store.thread('DM1')!.routerKey)).toBe(1) // the message waits for its router
+
+    // The next thread in that chat goes to the same workspace; another person gets their own.
+    await dm(hub, 'U1', 'D1', 'DM2', 'and the tests?')
+    expect(hub.store.thread('DM2')!.workspace).toBe('personal-U1')
+    await dm(hub, 'U2', 'D2', 'DM3', 'hi, a question')
+    expect(hub.store.thread('DM3')!.workspace).toBe('personal-U2')
+    expect(loadBindings(p.bindings)).toMatchObject({ D1: 'personal-U1', D2: 'personal-U2' })
+  }, T)
+
+  test('a chat bound to a workspace stays there; personalWorkspaces false asks "which workspace?" as before', async () => {
+    const a = setup({}, owners)
+    a.hub.bot = { id: 'BOT', username: 'hubbot' }
+    bindChannel(a.p.bindings, 'D1', 'demo')
+    await dm(a.hub, 'U1', 'D1', 'DM1', 'can you check the build?')
+    expect(a.hub.store.thread('DM1')!.workspace).toBe('demo')
+    expect(loadWorkspace(a.hub.cfg, 'personal-U1')).toBeUndefined()
+
+    const b = setup({ personalWorkspaces: false }, owners)
+    b.hub.bot = { id: 'BOT', username: 'hubbot' }
+    await dm(b.hub, 'U1', 'D1', 'DM1', 'can you check the build?')
+    expect(b.posts[0]!.message).toContain('This chat is not connected to a workspace yet')
+    expect(b.hub.store.thread('DM1')).toBeUndefined()
+    expect(loadWorkspace(b.hub.cfg, 'personal-U1')).toBeUndefined()
   }, T)
 })
 

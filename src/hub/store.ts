@@ -156,7 +156,8 @@ CREATE INDEX IF NOT EXISTS job_runs_job ON job_runs(job_id, id);
  */
 export type LinkRow = {
   threadId: string
-  kind: 'workspace' | 'dm'
+  /** workspace: a request to another workspace; dm: a DM straight to a person; personal: a private question their own agent asks them. */
+  kind: 'workspace' | 'dm' | 'personal'
   channelId: string
   /** The session that opened it; answers go to it. */
   fromKey: string
@@ -245,7 +246,7 @@ function toLink(r: Raw): LinkRow {
     if (Array.isArray(c)) chain = c.map(String)
   } catch {}
   return {
-    threadId: String(r.thread_id), kind: r.kind === 'dm' ? 'dm' : 'workspace', channelId: String(r.channel_id), fromKey: String(r.from_key),
+    threadId: String(r.thread_id), kind: r.kind === 'dm' || r.kind === 'personal' ? r.kind : 'workspace', channelId: String(r.channel_id), fromKey: String(r.from_key),
     fromWorkspace: String(r.from_workspace), fromThread: s(r.from_thread), peer: String(r.peer), chain, messages: Number(r.messages), createdAt: Number(r.created_at),
   }
 }
@@ -377,6 +378,7 @@ export class Store {
       swap('workers', 'threads')
       swap('workers', 'active_thread')
       swap('inbox', 'meta')
+      swap('links', 'thread_id')
       swap('links', 'from_thread')
       swap('jobs', 'thread_id')
       swap('jobs', 'last_thread')
