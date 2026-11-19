@@ -127,6 +127,15 @@ export function toolsFor(role: Role, reports: Reports = 'router'): Tool[] {
         }, ['text']),
       },
       {
+        name: 'new_thread',
+        description: "Start a new thread: a new top-level post in a channel of your workspace (this thread's channel unless you name another), when a person here asks you to post there: an introduction, an announcement, a summary for everyone. Never on your own initiative. A router of its own answers replies in it; you stay with this thread. Returns the post's link: tell the person where it is.",
+        inputSchema: obj({
+          text: s('The post (Markdown, max 16000 chars)'),
+          message_id: s("The id of the person's message that asked for the post"),
+          channel: s('Optional: another channel of your workspace, by name ("town-square", "~ops"), link or id. The person must be a member of it.'),
+        }, ['text', 'message_id']),
+      },
+      {
         name: 'answer_request',
         description: 'Your thread is a private question from another session (kind="dm_request"): send back what it asked, from what the person told you. Only this reaches the asker; your replies here reach only the person. In your own words: the decision or facts it needs, not their messages, and nothing they did not mean to share; if they declined or do not know, say that. Refused when it quotes them, unless verbatim says why it must.',
         inputSchema: obj({

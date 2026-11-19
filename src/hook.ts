@@ -1,10 +1,11 @@
 #!/usr/bin/env bun
 /**
  * Hook notifier for hub-spawned sessions (SessionStart, Stop, StopFailure,
- * SessionEnd): tells the hub, and on SessionStart prints the hub's fresh
- * context (repo map, workers, worktrees) as additionalContext. On Stop the hub
- * may send the turn back ("decision": "block") when it ended with text but
- * posted nothing: that text went to the terminal, where nobody reads it.
+ * SessionEnd, PreToolUse on Bash): tells the hub, and on SessionStart prints the
+ * hub's fresh context (repo map, workers, worktrees) as additionalContext. On Stop
+ * the hub may send the turn back ("decision": "block") when it ended with text but
+ * posted nothing: that text went to the terminal, where nobody reads it. On
+ * PreToolUse it may deny the command: one that runs another AI agent nobody asked for.
  * Always exits 0 — a hub that is down must never block a session.
  */
 
@@ -13,7 +14,7 @@ import { roundTrip, type HookEvent } from './shared/ipc'
 import { paths } from './shared/paths'
 import { SESSION_KEY_RE } from './shared/snapshot'
 
-const EVENTS: HookEvent[] = ['SessionStart', 'Stop', 'StopFailure', 'SessionEnd']
+const EVENTS: HookEvent[] = ['SessionStart', 'Stop', 'StopFailure', 'SessionEnd', 'PreToolUse']
 
 try {
   const input = JSON.parse((await Bun.stdin.text()) || '{}') as {
@@ -27,10 +28,13 @@ try {
     stop_hook_active?: boolean
     last_assistant_message?: string
     transcript_path?: string
+    tool_name?: string
+    tool_input?: { command?: unknown }
   }
   const key = process.argv[2] ?? process.env.MMHUB_SESSION_KEY ?? ''
   const event = input.hook_event_name as HookEvent
-  if (SESSION_KEY_RE.test(key) && EVENTS.includes(event)) {
+  const command = event === 'PreToolUse' && typeof input.tool_input?.command === 'string' ? input.tool_input.command : ''
+  if (SESSION_KEY_RE.test(key) && EVENTS.includes(event) && (event !== 'PreToolUse' || command)) {
     // StopFailure: the hub decides from this text whether to retry (rate limit, overloaded, …).
     const text = (v: unknown) => (v === undefined || v === null || v === '' ? '' : typeof v === 'string' ? v : JSON.stringify(v))
     const err = [...new Set([input.error, input.error_type, input.error_details, input.message].map(text).filter(Boolean))].join(' — ')
@@ -43,12 +47,16 @@ try {
       ...(input.source ? { source: input.source } : {}),
       ...(err ? { error: err.slice(0, 500) } : {}),
       ...(event === 'Stop' ? { stop_hook_active: !!input.stop_hook_active, text: lastText(input).trim().slice(0, 200) } : {}),
-    }, 5000)
+      ...(event === 'PreToolUse' ? { tool: input.tool_name ?? '', command: command.slice(0, 8000) } : {}),
+    }, event === 'PreToolUse' ? 3000 : 5000)
     if (event === 'SessionStart' && res.t === 'hook_result' && res.additionalContext) {
       process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: res.additionalContext } }))
     }
     if (event === 'Stop' && res.t === 'hook_result' && res.block) {
       process.stdout.write(JSON.stringify({ decision: 'block', reason: res.block }))
+    }
+    if (event === 'PreToolUse' && res.t === 'hook_result' && res.deny) {
+      process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: res.deny } }))
     }
   }
 } catch {

@@ -61,6 +61,11 @@ export type HubConfig = {
    * own, personal-<user id>, instead of the "which workspace?" question. Default true.
    */
   personalWorkspaces: boolean
+  /**
+   * Other AI agents' commands on this machine (lowercase). A worker's Bash command that
+   * runs one is denied unless a person in its thread named that agent. [] allows them.
+   */
+  otherAgents: string[]
   /** Minutes without a hook event before a busy worker is flagged. */
   busyWatchdogMinutes: number
   claudeBin?: string
@@ -120,6 +125,7 @@ export const DEFAULT_CONFIG: HubConfig = {
   announceClose: false,
   cleanupHours: 24,
   personalWorkspaces: true,
+  otherAgents: ['hermes', 'hermes-agent', 'codex', 'gemini', 'opencode', 'aider', 'openclaw', 'cursor-agent', 'qwen'],
   busyWatchdogMinutes: 30,
   disablePlugins: [],
   tmuxSocket: 'mmhub',
@@ -142,6 +148,9 @@ export function loadConfig(file: string): HubConfig {
     unfollowAfter: typeof raw.unfollowAfter === 'number' && raw.unfollowAfter >= 0 ? Math.floor(raw.unfollowAfter) : DEFAULT_CONFIG.unfollowAfter,
     cleanupHours: hours(raw.cleanupHours) ?? DEFAULT_CONFIG.cleanupHours,
     personalWorkspaces: raw.personalWorkspaces !== false,
+    otherAgents: Array.isArray(raw.otherAgents)
+      ? raw.otherAgents.filter((n): n is string => typeof n === 'string' && !!n.trim()).map(n => n.trim().toLowerCase())
+      : DEFAULT_CONFIG.otherAgents,
     laya: { ...DEFAULT_LAYA, ...(raw.laya ?? {}) },
     openrouter: { ...DEFAULT_OPENROUTER, ...(raw.openrouter ?? {}) },
   }

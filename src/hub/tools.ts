@@ -15,6 +15,8 @@ import { listSchedulesTool, scheduleTool, unscheduleTool } from './jobs'
 import { answerRequest, forwardAnswer, linkedTo, listWorkspacesText, messageWorkspace, sendDM } from './links'
 import { inDM, setFollowing } from './trigger'
 import type { MMPost } from './mattermost'
+import { checkBotMentions } from './bots'
+import { newThread } from './newthread'
 import { isDraft, type ThreadRow } from './store'
 import { effective, prepareWorktree } from './workspaces'
 import { listChannels, ownThread, postIdOf, readChannel, readOtherThread, searchMessages, threadText } from './explore'
@@ -109,6 +111,7 @@ const drafts = new Map<string, Promise<unknown>>()
 export async function postAs(hub: Hub, key: string, thread: ThreadRow, text: string, files: string[] = []): Promise<string[]> {
   if (!text.trim() && !files.length) throw new ToolError('empty reply')
   checkFiles(hub, files)
+  await checkBotMentions(hub, key, text)
   if (!isDraft(thread.id)) return postIn(hub, key, thread, text, files)
   const id = thread.id
   const run = (drafts.get(id) ?? Promise.resolve()).catch(() => {}).then(() => postIn(hub, key, hub.store.thread(id) ?? thread, text, files))
@@ -333,7 +336,7 @@ export async function queueTask(hub: Hub, key: string, thread: ThreadRow, text: 
 
 /** Run one tool call for session `key`. Returns the text shown to the model. */
 /** Tools that reach someone: a post, a reaction, a worker, another workspace, an owner, or leaving a thread. */
-const REACHES = new Set(['reply', 'react', 'edit_message', 'delegate', 'message_workspace', 'send_dm', 'answer_request', 'unfollow'])
+const REACHES = new Set(['reply', 'react', 'edit_message', 'delegate', 'message_workspace', 'send_dm', 'answer_request', 'new_thread', 'unfollow'])
 
 export async function handleCall(hub: Hub, key: string, tool: string, a: Args): Promise<string> {
   const text = await callTool(hub, key, tool, a)
@@ -363,6 +366,7 @@ async function callTool(hub: Hub, key: string, tool: string, a: Args): Promise<s
       const id = str(a, 'message_id')!
       if (hub.store.postOwner(id) !== key) throw new ToolError('you can only edit your own posts')
       const text = str(a, 'text')!
+      await checkBotMentions(hub, key, text)
       const header = role === 'worker' ? `**🛠 ${hub.label(key)}**\n` : ''
       await hub.mm.patchPost(id, { message: header + text })
       return 'edited'
@@ -394,6 +398,8 @@ async function callTool(hub: Hub, key: string, tool: string, a: Args): Promise<s
       })
     case 'send_dm':
       return sendDM(hub, key, { user: str(a, 'user', false), text: str(a, 'text')!, threadId: str(a, 'thread_id', false) })
+    case 'new_thread':
+      return newThread(hub, key, { text: str(a, 'text')!, messageId: str(a, 'message_id')!, channel: str(a, 'channel', false) })
     case 'answer_request':
       return answerRequest(hub, key, { text: str(a, 'text')!, verbatim: str(a, 'verbatim', false) })
     case 'schedule':

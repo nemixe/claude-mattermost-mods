@@ -8,7 +8,7 @@ export const PROTO = 1
 
 export type Role = 'router' | 'worker'
 
-export type HookEvent = 'SessionStart' | 'Stop' | 'StopFailure' | 'SessionEnd'
+export type HookEvent = 'SessionStart' | 'Stop' | 'StopFailure' | 'SessionEnd' | 'PreToolUse'
 
 export type ClientMsg =
   | { t: 'hello'; proto: number; role: Role; key: string; pid: number; claudePid?: number }
@@ -16,7 +16,8 @@ export type ClientMsg =
   | { t: 'permission_request'; request_id: string; tool_name: string; description: string; input_preview: string }
   /** spawn: the launch the hook came from (MMHUB_SPAWN), so a late hook of a replaced process is ignored. */
   /** stop_hook_active / text (Stop): Claude Code's flag that a Stop hook already sent this turn back, and the turn's last text. */
-  | { t: 'hook'; key: string; event: HookEvent; session_id?: string; source?: string; error?: string; spawn?: string; stop_hook_active?: boolean; text?: string }
+  /** tool / command (PreToolUse): the shell command a session is about to run. */
+  | { t: 'hook'; key: string; event: HookEvent; session_id?: string; source?: string; error?: string; spawn?: string; stop_hook_active?: boolean; text?: string; tool?: string; command?: string }
   | { t: 'control'; id: number; op: string; args: Record<string, unknown> }
 
 export type HubMsg =
@@ -25,7 +26,8 @@ export type HubMsg =
   | { t: 'permission'; request_id: string; behavior: 'allow' | 'deny' }
   | { t: 'result'; id: number; ok: boolean; text?: string; error?: string; data?: unknown }
   /** block (Stop): send the turn back to the session with this reason instead of ending it. */
-  | { t: 'hook_result'; additionalContext?: string; block?: string }
+  /** deny (PreToolUse): refuse the tool call, with this reason for the session. */
+  | { t: 'hook_result'; additionalContext?: string; block?: string; deny?: string }
 
 export function encode(msg: ClientMsg | HubMsg): string {
   return JSON.stringify(msg) + '\n'

@@ -48,7 +48,8 @@ describe('launch argv', () => {
       hookCommand: 'bun hook.ts r-abc', carry: {}, disablePlugins: ['telegram@x'],
     })
     expect((s.hooks!.Stop as unknown[]).length).toBe(2)
-    expect(Object.keys(s.hooks!).sort()).toEqual(['SessionEnd', 'SessionStart', 'Stop', 'StopFailure'])
+    expect(Object.keys(s.hooks!).sort()).toEqual(['PreToolUse', 'SessionEnd', 'SessionStart', 'Stop', 'StopFailure'])
+    expect(s.hooks!.PreToolUse).toEqual([{ matcher: 'Bash', hooks: [{ type: 'command', command: 'bun hook.ts r-abc', timeout: 15 }] }])
     expect(s.permissions).toEqual({ allow: ['Bash(npm test)'] })
     expect(s.enabledPlugins).toEqual({ 'telegram@x': false })
   })

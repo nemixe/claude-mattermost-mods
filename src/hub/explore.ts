@@ -61,7 +61,7 @@ async function readerFor(hub: Hub, key: string, messageId?: string): Promise<str
 const memberCache = new Map<string, { yes: boolean; at: number }>()
 const MEMBER_TTL = 60_000
 
-async function isMember(hub: Hub, channelId: string, userId: string): Promise<boolean> {
+export async function isMember(hub: Hub, channelId: string, userId: string): Promise<boolean> {
   const k = `${channelId} ${userId}`
   const hit = memberCache.get(k)
   if (hit && Date.now() - hit.at < MEMBER_TTL) return hit.yes
@@ -87,7 +87,7 @@ async function mustRead(hub: Hub, key: string, ch: MMChannel, reader: string | u
 
 // ---------------------------------------------------------------- showing
 
-function channelLabel(ch: MMChannel): string {
+export function channelLabel(ch: MMChannel): string {
   if (ch.type === 'D') return 'a direct message'
   if (ch.type === 'G') return `a group message (${ch.display_name})`
   return `~${ch.name}${ch.display_name && ch.display_name !== ch.name ? ` (${ch.display_name})` : ''}`
@@ -152,7 +152,7 @@ async function teams(hub: Hub, key: string): Promise<MMTeam[]> {
   return [...all.filter(t => t.id === first), ...all.filter(t => t.id !== first)]
 }
 
-async function resolveChannel(hub: Hub, key: string, ref: string): Promise<MMChannel> {
+export async function resolveChannel(hub: Hub, key: string, ref: string): Promise<MMChannel> {
   const r = channelRefOf(ref)
   if (POST_ID.test(r.name)) {
     const c = await hub.mm.channel(r.name).catch(() => undefined)

@@ -21,6 +21,7 @@ import { buildDigest } from './digest'
 import { decideInbound, decideReaction, type InboundAction } from './inbound'
 import { pruneJobRuns, runDueJobs } from './jobs'
 import { dmReply } from './links'
+import { originKey } from './newthread'
 import { keepServing, serveKey, servePaths, warmUp, type Keeper } from './layaserve'
 import { classifyLater, countSkipped, following, inDM, noteDM, setFollowing, takeSkipped } from './trigger'
 import { canRestartNow, classifyFailure, dueForIdleClose, isLive, looksBusy, noticeForRetry, pickEvictee, planStart, RestartBudget, retryDelay, type ReapView } from './lifecycle'
@@ -751,6 +752,12 @@ export class Hub {
    */
   async deliver(key: string, content: string, meta: Record<string, string>): Promise<{ state: 'delivered' | 'queued'; id: number }> {
     const l = this.liveOf(key)
+    // A thread another router started (new_thread): its router learns how with its first message.
+    const origin = key.startsWith('r-') ? this.store.get(originKey(key)) : undefined
+    if (origin) {
+      content = `${origin}\n\n${content}`
+      this.store.del(originKey(key))
+    }
     const id = this.store.insertMessage({ sessionKey: key, content, meta, state: 'queued', createdAt: Date.now() })
     this.status.changed()
     if (this.held(key)) return { state: 'queued', id } // goes in with the scheduled retry

@@ -81,6 +81,23 @@ the `/mm` panel. The CLI is `bun ~/claude-mattermost-mods/bin/mmhub` (alias it t
   you had pasted it there. The bot itself can read public channels of its teams, but
   private channels, DMs and group messages only when it is a member, and search covers
   only channels it is a member of.
+- `@claude introduce yourself to the channel` → the router starts a new thread: a new
+  top-level post in this thread's channel, or another channel bound to the same
+  workspace that you are a member of. The new thread gets a router of its own, which
+  starts with the first reply there and is told what was posted, for whom and from which
+  thread; the router you asked stays in your thread. Only when a person asks, at most 5
+  an hour per thread.
+- The bot never hands work to another AI agent on its own: not to another bot on the
+  server, such as Hermes, and not to another agent's CLI on the machine. Two checks
+  enforce it, and both let it through when a person in the thread (or the scheduled job
+  it runs) named that agent: `@claude ask hermes for the nightly numbers` is fine.
+  - A post that @mentions another bot is refused.
+  - Every shell command a worker runs passes the hub first (a `PreToolUse` hook): one
+    that runs another agent's command (`hermes`, `codex`, `gemini`, … in `config.json`
+    `otherAgents`; `[]` allows them all) is denied, also in the background (`nohup`,
+    `&`, `tmux`, `bash -c`, `npx`). An agent's name as an argument, such as in a commit
+    message, doesn't count. It can't see an agent reached in other ways, such as its
+    HTTP API.
 - Thanks, or a bare "ok", gets a 🙏 reaction rather than a reply. Which replies reach the
   bot at all depends on the workspace's trigger: with `laya` or `openrouter`, thanks
   reach it only right after its own post.
@@ -485,7 +502,9 @@ to the router; `thread`: they post in the thread), `idleMinutes` (`{router:30, w
 0 = never), `maxLiveRouters` (6), `maxLiveWorkers` (4), `maxWorkersPerWorkspace` (6),
 `announceClose`, `personalWorkspaces` (true: a DM from a chat without a workspace gets
 the person their own, `personal-<user id>`; false: the "which workspace?" question),
-`cleanupHours` (24: a worker with no work this long cleans up after
+`otherAgents` (other AI agents' commands a worker may run only when a person in its
+thread named them: `hermes`, `hermes-agent`, `codex`, `gemini`, `opencode`, `aider`,
+`openclaw`, `cursor-agent`, `qwen`; `[]` allows them all), `cleanupHours` (24: a worker with no work this long cleans up after
 itself, see [Lifecycle](#lifecycle); 0 = never), `busyWatchdogMinutes` (30), `routerAutocompact`, `claudeBin`, `bunBin`,
 `gitBin`, `path`, `tmuxSocket` (`mmhub`), `providers` (`["default"]`),
 `providerCooldownMinutes` (`{auth:60, quota:60, rate_limit:10, errors:15, channels:360}`),
@@ -589,7 +608,7 @@ a note telling the session to check what it already did:
 | the process crashed or was killed (`kill -9`, OOM) | noticed within seconds (its bridge drops and the tmux session is gone); resumes it (`--resume`) and re-delivers, without a post. At most 2 automatic restarts per 10 min, then `failed` and a ⚠️ post |
 | the machine restarted / sessions died while the hub was down | at `mmhub start`: resume and re-deliver, without a post |
 | the hub restarted while a turn ran | the session is adopted; the turn's Stop hook is checked against the screen |
-| the turn ended with text but posted nothing (it wrote its answer in its terminal instead of calling `reply`) | its Stop hook sends the turn back once ("Nothing was posted this turn…"), so it posts it; a turn that reached someone (`reply`, `react`, `edit_message`, `delegate`, `message_workspace`, `send_dm`, `answer_request`, `unfollow`) or ended without text isn't |
+| the turn ended with text but posted nothing (it wrote its answer in its terminal instead of calling `reply`) | its Stop hook sends the turn back once ("Nothing was posted this turn…"), so it posts it; a turn that reached someone (`reply`, `react`, `edit_message`, `delegate`, `message_workspace`, `send_dm`, `answer_request`, `new_thread`, `unfollow`) or ended without text isn't |
 | the turn ended with an API error (StopFailure) | overloaded / 5xx / network: retry after 20 s, 1 m, 3 m, 10 m (a ⚠️ post only from the third try). Rate limit: 5 m, 15 m, 30 m, then hourly (≈5 h), with one ⏸ post. Output limit: once, quietly. Invalid request: no retry, a ⚠️ post. Sign-in, usage/credit limits, rate limits, and errors that outlast these retries move the work to the workspace's next provider when it has one ([above](#providers-and-fallback)); otherwise sign-in errors aren't retried (a ⚠️ post) and usage limits wait like rate limits. New work for it waits for the retry; `!wake <id>` retries now |
 | an owner stopped it (`Stop`, `!stop`, `!worker stop`) | it stays stopped: its unfinished work waits for the next message, delegate or wake |
 

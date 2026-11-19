@@ -8,6 +8,7 @@ import net from 'net'
 import { encode, LineDecoder, PROTO, type ClientMsg, type HubMsg } from '../shared/ipc'
 import { SESSION_KEY_RE } from '../shared/snapshot'
 import { errMsg, log } from '../shared/util'
+import { otherAgentCheck } from './agents'
 import type { BridgeConn, Hub } from './hub'
 import { handleCall, ToolError } from './tools'
 
@@ -63,6 +64,11 @@ export function listen(hub: Hub, sockPath: string, control: ControlHandler): net
           }
           case 'hook': {
             if (!SESSION_KEY_RE.test(m.key)) return send({ t: 'hook_result' })
+            if (m.event === 'PreToolUse') {
+              // A command the session is about to run: only another agent nobody asked for is denied.
+              const deny = await otherAgentCheck(hub, m.key, m.command ?? '').catch(() => undefined)
+              return send({ t: 'hook_result', ...(deny ? { deny } : {}) })
+            }
             const additionalContext = m.event === 'SessionStart' ? hub.hookContext(m.key) : undefined
             // A turn sent back goes on: its Stop isn't the end of it.
             const block = hub.unpostedStop(m)

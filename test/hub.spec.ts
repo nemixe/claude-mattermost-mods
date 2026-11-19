@@ -17,6 +17,7 @@ import { Hub, type BridgeConn } from '../src/hub/hub'
 import { delegate, handleCall, ToolError } from '../src/hub/tools'
 import { control } from '../src/hub/control'
 import { addJob, runDueJobs } from '../src/hub/jobs'
+import { otherAgentCheck } from '../src/hub/agents'
 import { RETRY_DELAYS } from '../src/hub/lifecycle'
 import type { Mattermost, MMPost } from '../src/hub/mattermost'
 import { tmuxName, transcriptPath } from '../src/hub/spawn'
@@ -880,6 +881,106 @@ describe('cross-workspace requests and DMs', () => {
     await expect(handleCall(hub, rkey, 'send_dm', { user: 'devbot', text: 'x' })).rejects.toThrow('not a person')
     await expect(handleCall(hub, rkey, 'send_dm', { user: 'claude', text: 'x' })).rejects.toThrow('not a person')
     await expect(handleCall(hub, rkey, 'send_dm', { user: 'nobody', text: 'x' })).rejects.toThrow('not a person')
+  }, T)
+})
+
+describe('new threads, and other bots', () => {
+  /** Workspace demo bound to C1; a running router for thread T3 there; alice (U1) is a member of C1, bob (U2) isn't. */
+  async function scene() {
+    const env = setup({}, dir => {
+      writeFileSync(join(dir, 'access.json'), JSON.stringify({ dmPolicy: 'allowlist', allowFrom: ['U1'], channels: {}, pending: {} }))
+    })
+    const { hub, tmux, w, p, others } = env
+    hub.bot = { id: 'BOT', username: 'claude' }
+    bindChannel(p.bindings, 'C1', 'demo')
+    const people: Record<string, { id: string; username: string; is_bot?: boolean }> = {
+      alice: { id: 'U1', username: 'alice' }, hermes: { id: 'UH', username: 'hermes', is_bot: true }, claude: { id: 'BOT', username: 'claude', is_bot: true },
+    }
+    const mm = hub.mm as unknown as Record<string, unknown>
+    mm.userByName = async (n: string) => people[n]
+    mm.isMember = async (_ch: string, user: string) => user === 'U1'
+    const rkey = hub.createRouter({ threadId: 'T3', channelId: 'C1', workspace: w, label: 'onboarding' })
+    await hub.enqueue(() => hub.ensureStarted(rkey))
+    const rb = await connect(hub, tmux, rkey, 1)
+    const ask = (id: string, message: string, user_id = 'U1') => {
+      others.push({ id, root_id: 'T3', user_id, channel_id: 'C1', message, create_at: Date.now(), props: {} } as unknown as MMPost)
+      return id
+    }
+    return { ...env, rkey, rb, ask }
+  }
+
+  test('a router starts a new thread in its channel when a person asks; the thread gets a router of its own, started by the first reply', async () => {
+    const { hub, tmux, posts, rkey, ask } = await scene()
+    const m = ask('M1', 'Introduce yourself to the channel')
+    const res = await handleCall(hub, rkey, 'new_thread', { text: 'Hi all, I am Claude: mention me for help with the finance portal.', message_id: m })
+    expect(res).toContain('posted: http://mm/pl/p1, a new thread in ~C1')
+    expect(posts[0]).toMatchObject({ id: 'p1', channel_id: 'C1' })
+    expect(posts[0]!.root_id).toBeUndefined()
+    const t = hub.store.thread('p1')!
+    expect(t).toMatchObject({ channelId: 'C1', workspace: 'demo', label: 'Hi all, I am Claude: mention me for help with the finance po' })
+    expect(t.routerKey).not.toBe(rkey)
+    expect(hub.store.thread('T3')!.routerKey).toBe(rkey) // the asking router keeps its thread
+    expect(hub.store.session(t.routerKey)!.status).toBe('stopped') // nothing runs until someone replies
+    expect(tmux.launches.length).toBe(1)
+
+    // The first reply starts its router, which learns where the thread came from.
+    const reply = { id: 'R1', root_id: 'p1', user_id: 'U1', channel_id: 'C1', message: 'Welcome!', create_at: Date.now() } as MMPost
+    await hub.enqueue(() => hub.onPosted(reply, 'O'))
+    const nb = await connect(hub, tmux, t.routerKey, 2)
+    expect(nb.got[0]!.content).toContain('[You are the router of a thread the hub started: the router of thread T3 ("onboarding") posted its first post in ~C1, because @alice asked for it there.')
+    expect(nb.got[0]!.content).toContain('> Hi all, I am Claude')
+    expect(nb.got[0]!.content).toContain('Welcome!')
+    expect(hub.store.get(`origin:${t.routerKey}`)).toBeUndefined()
+  }, T)
+
+  test("new_thread: routers only, on a person's request, in the workspace's own channels they are members of, a few an hour", async () => {
+    const { hub, w, posts, others, rkey, ask } = await scene()
+    const { key } = worker(hub, w)
+    await expect(handleCall(hub, key, 'new_thread', { text: 'hi', message_id: 'M1' })).rejects.toThrow('routers only')
+    others.push({ id: 'B1', root_id: 'T3', user_id: 'UH', channel_id: 'C1', message: 'post it', create_at: Date.now(), props: { from_bot: 'true' } } as unknown as MMPost)
+    await expect(handleCall(hub, rkey, 'new_thread', { text: 'hi', message_id: 'B1' })).rejects.toThrow("message B1 is not a person's")
+    const other = 'abcdefghijklmnopqrstuvwxyz' // a channel of no workspace
+    await expect(handleCall(hub, rkey, 'new_thread', { text: 'hi', message_id: ask('M2', 'post it'), channel: other })).rejects.toThrow('is not a channel of workspace demo')
+    await expect(handleCall(hub, rkey, 'new_thread', { text: 'hi', message_id: ask('M3', 'post it', 'U2') })).rejects.toThrow('is not a member of ~C1')
+    hub.store.set(`newthreads:${rkey}`, JSON.stringify(Array(5).fill(Date.now())))
+    await expect(handleCall(hub, rkey, 'new_thread', { text: 'hi', message_id: ask('M4', 'post it') })).rejects.toThrow('in the last hour')
+    expect(posts).toEqual([])
+  }, T)
+
+  test('a post that @mentions another bot is refused, unless a person here named that bot', async () => {
+    const { hub, posts, rkey, ask } = await scene()
+    await expect(handleCall(hub, rkey, 'reply', { text: '@hermes please build the report for this thread' })).rejects.toThrow('@hermes is a bot, not a person')
+    await expect(handleCall(hub, rkey, 'new_thread', { text: 'Hey @hermes, can you take this?', message_id: ask('M1', 'Introduce yourself') })).rejects.toThrow('@hermes is a bot')
+    expect(posts).toEqual([])
+    // People, @here, its own name and things that aren't users are fine.
+    await handleCall(hub, rkey, 'reply', { text: 'Done, @alice. Ping @here if it breaks; install @types/node first. I am @claude.' })
+    expect(posts.length).toBe(1)
+    // A person asked for it: then it may.
+    ask('M2', 'Can you ask hermes to run the nightly report?')
+    await handleCall(hub, rkey, 'reply', { text: '@hermes please run the nightly report.' })
+    expect(posts.length).toBe(2)
+    await handleCall(hub, rkey, 'edit_message', { message_id: posts[1]!.id, text: '@hermes please run the nightly report now.' })
+  }, T)
+
+  test("a worker's command that runs another agent is denied, unless a person in its thread named that agent", async () => {
+    const { hub, w, others } = await scene()
+    const { key } = worker(hub, w)
+    const bg = 'cd repo && nohup hermes chat -q "fix the login bug" > /tmp/h.log 2>&1 &'
+    expect(await otherAgentCheck(hub, key, bg)).toContain("hermes is another AI agent: don't hand it this work")
+    expect(await otherAgentCheck(hub, key, 'npm test && git commit -m "hermes support"')).toBeUndefined()
+    // config otherAgents: [] allows them all.
+    hub.cfg.otherAgents = []
+    expect(await otherAgentCheck(hub, key, bg)).toBeUndefined()
+    hub.cfg.otherAgents = ['hermes']
+    // A person in the worker's thread asked for it.
+    others.push({ id: 'M9', root_id: 'T1', user_id: 'U1', channel_id: 'C1', message: 'Let Hermes take a first pass at it', create_at: Date.now(), props: {} } as unknown as MMPost)
+    expect(await otherAgentCheck(hub, key, bg)).toBeUndefined()
+  }, T)
+
+  test("a bot naming another bot doesn't count as asking for it", async () => {
+    const { hub, others, rkey } = await scene()
+    others.push({ id: 'B1', root_id: 'T3', user_id: 'UH', channel_id: 'C1', message: 'ask @hermes for the numbers', create_at: Date.now(), props: { from_bot: 'true' } } as unknown as MMPost)
+    await expect(handleCall(hub, rkey, 'reply', { text: '@hermes the numbers, please' })).rejects.toThrow('nobody here named @hermes')
   }, T)
 })
 

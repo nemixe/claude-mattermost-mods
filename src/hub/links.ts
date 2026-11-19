@@ -27,6 +27,7 @@
 
 import { errMsg, fmtAge, log, safeName, shortId } from '../shared/util'
 import { EVERYONE } from './access'
+import { checkBotMentions } from './bots'
 import type { Hub } from './hub'
 import type { MMPost } from './mattermost'
 import { DRAFT, type LinkRow, type ThreadRow } from './store'
@@ -144,6 +145,7 @@ export function listWorkspacesText(hub: Hub, key: string): string {
 /** message_workspace: a new request to another workspace, or a follow-up on one. */
 export async function messageWorkspace(hub: Hub, key: string, a: { workspace?: string; text: string; requestId?: string; threadId?: string }): Promise<string> {
   const text = checkText(a.text)
+  await checkBotMentions(hub, key, text)
   const mine = workspaceOf(hub, key)
 
   if (a.requestId) {

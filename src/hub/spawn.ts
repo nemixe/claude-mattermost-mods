@@ -76,6 +76,8 @@ export function buildSettings(o: { workspaceSettings: Settings; hookCommand: str
   for (const ev of HOOK_EVENTS) {
     hooks[ev] = [...(hooks[ev] ?? []), { hooks: [{ type: 'command', command: o.hookCommand, timeout: 15 }] }]
   }
+  // Shell commands go past the hub first: it denies running another AI agent nobody asked for (agents.ts).
+  hooks.PreToolUse = [...(hooks.PreToolUse ?? []), { matcher: 'Bash', hooks: [{ type: 'command', command: o.hookCommand, timeout: 15 }] }]
   out.hooks = hooks
   if (o.disablePlugins.length) {
     out.enabledPlugins = { ...((o.workspaceSettings.enabledPlugins as Record<string, boolean>) ?? {}), ...Object.fromEntries(o.disablePlugins.map(p => [p, false])) }
