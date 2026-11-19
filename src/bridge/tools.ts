@@ -128,8 +128,11 @@ export function toolsFor(role: Role, reports: Reports = 'router'): Tool[] {
       },
       {
         name: 'answer_request',
-        description: 'Your thread is a private question from another session (kind="dm_request"): send back what it asked, from what the person told you. Only this reaches the asker; your replies here reach only the person. Leave out anything they did not mean to share; if they declined or do not know, say that.',
-        inputSchema: obj({ text: s('The answer for the asking session (Markdown, max 8000 chars)') }, ['text']),
+        description: 'Your thread is a private question from another session (kind="dm_request"): send back what it asked, from what the person told you. Only this reaches the asker; your replies here reach only the person. In your own words: the decision or facts it needs, not their messages, and nothing they did not mean to share; if they declined or do not know, say that. Refused when it quotes them, unless verbatim says why it must.',
+        inputSchema: obj({
+          text: s('The answer for the asking session, in your words (Markdown, max 8000 chars)'),
+          verbatim: s('Only when the person told you to pass their exact words on and the exact wording matters: why (e.g. "she asked me to send her wording for the release note")'),
+        }, ['text']),
       },
       {
         name: 'unfollow',

@@ -768,7 +768,7 @@ describe('cross-workspace requests and DMs', () => {
   }
 
   test("a private question goes through the person's own agent: it asks them in a DM and sends their answer back", async () => {
-    const { hub, tmux, w, p, posts, key } = await scene(dir => {
+    const { hub, tmux, w, p, posts, others, key } = await scene(dir => {
       writeFileSync(join(dir, 'access.json'), JSON.stringify({ dmPolicy: 'allowlist', allowFrom: ['U1'], channels: {}, pending: {} }))
     })
     const { rkey, rb } = await askingRouter(hub, tmux, w, 2)
@@ -797,19 +797,32 @@ describe('cross-workspace requests and DMs', () => {
     expect(rb.got.length).toBe(0) // the question to her doesn't go back to the asker
 
     // ... she answers there: it reaches her agent, not the asker, which can't read the DM either.
-    const reply = { id: 'R1', root_id: root, user_id: 'U1', channel_id: 'D1', message: 'Yes, after 3pm.', create_at: Date.now() } as MMPost
+    const said = 'May it deploy to staging today? Yes, but only after 3pm, once the payments migration has finished running.'
+    const reply = { id: 'R1', root_id: root, user_id: 'U1', channel_id: 'D1', message: said, create_at: Date.now() } as MMPost
+    others.push(reply)
     await hub.enqueue(() => hub.onPosted(reply, 'D'))
     await until('her answer reaches her agent', () => ab.got.length === 2)
-    expect(ab.got[1]!.content).toContain('Yes, after 3pm.')
+    expect(ab.got[1]!.content).toContain(said)
     expect(rb.got.length).toBe(0)
     await expect(handleCall(hub, rkey, 'fetch_thread', { thread_id: root })).rejects.toThrow()
 
-    // Her agent sends back what was asked.
-    expect(await handleCall(hub, t.routerKey, 'answer_request', { text: 'Yes, after 3pm today.' })).toContain('sent back to workspace demo')
+    // Her agent sends back what was asked, in its own words: her words, quoted, are refused.
+    await expect(handleCall(hub, t.routerKey, 'answer_request', { text: `She said: "${said.slice(31)}"` }))
+      .rejects.toThrow(`"yes but only after 3pm once…" is @alice's own words`)
+    expect(rb.got.length).toBe(0)
+    // Words of the question she echoed don't count.
+    const gist = 'Re may it deploy to staging today: approved after 3pm, when the payments migration is done.'
+    expect(await handleCall(hub, t.routerKey, 'answer_request', { text: gist })).toContain('sent back to workspace demo')
     await until('the answer reaches the asker', () => rb.got.length === 1)
     expect(rb.got[0]!.meta).toMatchObject({ kind: 'dm_reply', user: 'alice' })
     expect(rb.got[0]!.content).toContain("[Answer from @alice's own agent (workspace personal-U1)")
-    expect(rb.got[0]!.content).toContain('Yes, after 3pm today.')
+    expect(rb.got[0]!.content).toContain(gist)
+    expect(rb.got[0]!.content).not.toContain('quotes')
+    // Her exact words only when the agent says why they must go as they are.
+    await handleCall(hub, t.routerKey, 'answer_request', { text: said, verbatim: 'she asked me to send her wording as it is' })
+    await until('the quote reaches the asker', () => rb.got.length === 2)
+    expect(rb.got[1]!.content).toContain(said)
+    expect(rb.got[1]!.content).toContain("(It quotes @alice's own words, as they asked: she asked me to send her wording as it is)")
 
     // The asker asks more, by the id it was given: her agent gets it.
     await handleCall(hub, rkey, 'send_dm', { thread_id: draft, text: 'Which branch?' })

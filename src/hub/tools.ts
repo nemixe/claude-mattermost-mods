@@ -395,7 +395,7 @@ async function callTool(hub: Hub, key: string, tool: string, a: Args): Promise<s
     case 'send_dm':
       return sendDM(hub, key, { user: str(a, 'user', false), text: str(a, 'text')!, threadId: str(a, 'thread_id', false) })
     case 'answer_request':
-      return answerRequest(hub, key, { text: str(a, 'text')! })
+      return answerRequest(hub, key, { text: str(a, 'text')!, verbatim: str(a, 'verbatim', false) })
     case 'schedule':
       return scheduleTool(hub, key, {
         schedule: str(a, 'schedule')!,

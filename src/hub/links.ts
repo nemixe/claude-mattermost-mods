@@ -9,7 +9,9 @@
  *   person's own agent: a new router of their personal workspace (personal-<user id>,
  *   created on first use), in a new thread of their DM with the bot. It asks them in
  *   its own words; their replies reach it, not the asker, and it sends back what was
- *   asked with `answer_request`. The asker never reads the DM. With config
+ *   asked with `answer_request`, in its own words too: the hub refuses an answer that
+ *   quotes them (QUOTE_WORDS words of theirs in a row) unless `verbatim` says why it
+ *   must. The asker never reads the DM. With config
  *   `personalWorkspaces: false`, `send_dm` posts in the DM itself and the person's
  *   replies go straight back.
  *
@@ -306,25 +308,74 @@ function privateMeta(t: ThreadRow, from: string, fromLabel: string): Record<stri
 }
 
 /** answer_request: the person's own agent sends their answer to a private question back to the session that asked. */
-export async function answerRequest(hub: Hub, key: string, a: { text: string }): Promise<string> {
+export async function answerRequest(hub: Hub, key: string, a: { text: string; verbatim?: string }): Promise<string> {
   const text = checkText(a.text)
   const t = key.startsWith('r-') ? hub.store.threadByRouter(key) : undefined
   const l = t ? hub.store.link(t.id) : undefined
   if (!t || !l || l.kind !== 'personal') throw new ToolError('your thread is no private question from another session, so there is nothing to answer: reply talks to the person')
   checkOpen(l)
   const person = safeName(await hub.mm.username(l.peer)) ?? l.peer
+  const verbatim = a.verbatim?.replace(/\s+/g, ' ').trim().slice(0, 200) || undefined
+  if (!verbatim) {
+    const run = await quoteOf(hub, l, text)
+    if (run) throw new ToolError(`"${run}…" is @${person}'s own words. Send back what the asker needs in your words: the decision or facts, not their message. Quote them only when they told you to pass their exact words on and the exact wording matters: then say why in verbatim.`)
+  }
   return hub.enqueue(async () => {
     hub.store.bumpLink(l.threadId)
     const content = [
       `[Answer from @${person}'s own agent (workspace ${t.workspace}) to your private question (thread ${l.threadId})]`,
       '',
       text,
+      verbatim ? `\n(It quotes @${person}'s own words, as they asked: ${verbatim})` : '',
       `\n(Ask more with send_dm(thread_id="${l.threadId}", text=…), or carry on.)`,
-    ].join('\n')
+    ].filter(s => s !== '').join('\n')
     await toAsker(hub, l, content, { kind: 'dm_reply', dm_thread: l.threadId, user: person, user_id: l.peer })
-    log('links', `${key} answered ${l.fromKey}'s private question ${l.threadId}`)
+    log('links', `${key} answered ${l.fromKey}'s private question ${l.threadId}${verbatim ? ` — quoting them: ${verbatim}` : ''}`)
     return `sent back to workspace ${l.fromWorkspace}. Nothing was posted: tell @${person} only if it helps them.`
   })
+}
+
+/** Words in a row that make an answer a quote of the person. */
+export const QUOTE_WORDS = 6
+
+function words(text: string): string[] {
+  return text.toLowerCase().match(/[\p{L}\p{N}]+(?:['’]\p{L}+)*/gu) ?? []
+}
+
+function runs(texts: string[]): Set<string> {
+  const out = new Set<string>()
+  for (const t of texts) {
+    const w = words(t)
+    for (let i = 0; i + QUOTE_WORDS <= w.length; i++) out.add(w.slice(i, i + QUOTE_WORDS).join(' '))
+  }
+  return out
+}
+
+/**
+ * The first QUOTE_WORDS words in a row of `text` that are also in one of `theirs`, if any.
+ * Runs that are in `ours` too don't count: the person echoing the question isn't theirs to keep.
+ */
+export function quoted(text: string, theirs: string[], ours: string[] = []): string | undefined {
+  const their = runs(theirs)
+  const mine = runs(ours)
+  const w = words(text)
+  for (let i = 0; i + QUOTE_WORDS <= w.length; i++) {
+    const run = w.slice(i, i + QUOTE_WORDS).join(' ')
+    if (their.has(run) && !mine.has(run)) return run
+  }
+  return undefined
+}
+
+/** Whether `text` quotes what the person wrote in a private question's DM thread. */
+async function quoteOf(hub: Hub, l: LinkRow, text: string): Promise<string | undefined> {
+  if (l.threadId.startsWith(DRAFT)) return undefined // not asked yet: nothing of theirs to quote
+  try {
+    const posts = Object.values((await hub.mm.getThread(l.threadId)).posts)
+    return quoted(text, posts.filter(p => p.user_id === l.peer).map(p => p.message), posts.filter(p => p.user_id !== l.peer).map(p => p.message))
+  } catch (e) {
+    log('links', `${l.threadId}: couldn't read the DM thread to check the answer for quotes: ${errMsg(e)}`)
+    return undefined
+  }
 }
 
 async function ownerNamed(hub: Hub, user: string): Promise<{ id: string; name: string }> {
@@ -386,7 +437,7 @@ export async function dmReply(hub: Hub, post: MMPost): Promise<void> {
   const user = safeName(await hub.mm.username(post.user_id)) ?? post.user_id
   const files = post.metadata?.files ?? []
   const content = [
-    `[DM reply from @${user} to your message (DM thread ${l.threadId})]`,
+    `[DM reply from @${user} to your message (DM thread ${l.threadId}). Private: in your thread pass on only what is needed, in your own words]`,
     '',
     post.message,
     files.length || post.file_ids?.length ? `\n(${files.length || post.file_ids!.length} file(s) attached: download_attachment(message_id="${post.id}"))` : '',

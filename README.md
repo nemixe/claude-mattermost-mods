@@ -328,8 +328,13 @@ A router or worker can ask another workspace, through that workspace's router:
   their DM with the bot if needed), not to the person. That router asks them in the DM
   in its own words (its first post opens the thread), talks it through, and sends back
   what was asked with `answer_request(text)`. The asker gets it as a `dm_reply` message;
-  it never sees the DM itself, and the person's agent leaves out what they didn't mean
-  to share. Follow-ups use the `thread_id` the asker was given. Only **owners**
+  it never sees the DM itself. The answer is in the agent's words: the decision or facts
+  the asker needs, not the person's messages, and nothing they didn't mean to share. The
+  hub refuses an answer with six or more of the person's words in a row (words of the
+  question they echo don't count). Their exact words go through only when they asked
+  for it and the wording matters: the agent then says why (`verbatim`), and the asker
+  is told it is a quote. The asker in turn passes on only what its thread needs, in its
+  own words. Follow-ups use the `thread_id` the asker was given. Only **owners**
   (`access.json` `allowFrom`) can be asked; with `"*"` in `allowFrom`, any person (never
   a bot). With `personalWorkspaces: false` in `config.json`, `send_dm` DMs the owner
   directly from the bot, and their replies in that DM thread go back to the router.
