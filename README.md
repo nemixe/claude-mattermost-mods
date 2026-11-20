@@ -81,6 +81,13 @@ the `/mm` panel. The CLI is `bun ~/claude-mattermost-mods/bin/mmhub` (alias it t
   you had pasted it there. The bot itself can read public channels of its teams, but
   private channels, DMs and group messages only when it is a member, and search covers
   only channels it is a member of.
+- `@claude fill in the rekap tab of <link to a Google Sheet>` → a worker opens it. Routers
+  only read Mattermost and the workspace's files, with no logins, so anything behind an
+  account (a sheet, a dashboard, an API) goes to a worker, which has the machine's
+  accounts and skills. Each router's context lists the skills workers have (the
+  machine's `~/.claude/skills` and the workspace's `.claude/skills`, with their
+  descriptions), so it knows that, for example, `gws-access` opens Google Sheets as the
+  bot. It never tells you something can't be done or accessed before a worker has tried.
 - `@claude introduce yourself to the channel` → the router starts a new thread: a new
   top-level post in this thread's channel, or another channel bound to the same
   workspace that you are a member of. The new thread gets a router of its own, which

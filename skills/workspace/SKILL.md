@@ -34,6 +34,7 @@ A workspace is a folder `<workspacesDir>/<name>/` (default `~/claude-workspaces`
 | `TRIGGER.md` | optional: when the bot answers without an @mention (trigger `laya`): an `## Answer` and a `## Don't answer` list. Workers change it with their `trigger_rules` tool |
 | `.claude/settings.json` | permission rules for its sessions (e.g. `"allow": ["Bash(npm test:*)"]`) |
 | `.mcp.json` | optional extra MCP servers for its sessions |
+| `.claude/skills/` | optional skills for its workers, beside the machine's `~/.claude/skills`; routers see both lists, with descriptions, so they know what to hand a worker |
 | `repos/` | clones made by `mmhub repo add <ws> <git-url>` |
 | `.worktrees/<worker>/<repo>` | each worker's git worktree (branch `mm/<worker>`) |
 

@@ -22,6 +22,7 @@ import { decideInbound, decideReaction, type InboundAction } from './inbound'
 import { pruneJobRuns, runDueJobs } from './jobs'
 import { dmReply } from './links'
 import { originKey } from './newthread'
+import { workerSkills } from './skills'
 import { keepServing, serveKey, servePaths, warmUp, type Keeper } from './layaserve'
 import { classifyLater, countSkipped, following, inDM, noteDM, setFollowing, takeSkipped } from './trigger'
 import { canRestartNow, classifyFailure, dueForIdleClose, isLive, looksBusy, noticeForRetry, pickEvictee, planStart, RestartBudget, retryDelay, type ReapView } from './lifecycle'
@@ -1056,6 +1057,7 @@ export class Hub {
         // In a DM every message reaches the router, so it hears nothing about Laya or unfollow.
         trigger: t && inDM(this, t.id) ? 'mention' : effective(this.cfg, w).trigger,
         unfollowAfter: this.cfg.unfollowAfter,
+        skills: workerSkills(w),
       })
     }
     const worker = this.store.worker(key)

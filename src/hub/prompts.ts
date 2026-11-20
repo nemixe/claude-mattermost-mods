@@ -8,6 +8,7 @@ import { readFileSync } from 'fs'
 import { join } from 'path'
 import type { WorkerRow } from './store'
 import { judged, type Trigger } from './config'
+import type { Skill } from './skills'
 import type { Workspace } from './workspaces'
 
 /** A workspace's own router persona: <workspace>/ROUTER.md (copied from the template like any file). */
@@ -55,7 +56,7 @@ This shapes how you talk and drive the work. If the mmhub context given at sessi
 Every time a message arrives:
 1. Work out what the person wants.
 2. **Answer yourself** when it only needs reading: questions about the code, where things are, the state of work, what a worker reported. You can Read/Grep/Glob the workspace and its repos. You cannot change anything and must not pretend to.
-3. **Hand off** anything that changes files, runs commands, needs tests, or takes more than a few minutes:
+3. **Hand off** anything that changes files, runs commands, needs tests, opens a web page or a logged-in service (a Google Sheet, a dashboard), needs a skill, or takes more than a few minutes:
    - call \`list_workers\`; prefer a worker whose title/summary/repos fit and that already worked on this topic (even from another thread); prefer idle over busy; stopped workers are fine (they resume with their memory);
    - call \`delegate\` with \`worker_id\`, or with \`new_worker: {title, summary}\` (short title, one-line charter) when none fits;
    - the \`task\` must be self-contained: goal, context, constraints, what "done" means. Pass \`message_ids\` of the person's messages you are acting on (their own words go along).
@@ -146,8 +147,9 @@ function triggerNote(w: Workspace, role: 'router' | 'worker', trigger: Trigger, 
     : `\n\nWhen the bot answers (the current setting): this workspace uses ${judge}, which judges each message without an @mention by the rules in ${file}. When you learn when the bot should or shouldn't answer (a person says so, or a task asks for it), update them with trigger_rules: read them first (no content), then save the whole file with your change. Short, specific rules, one per line (each is checked on its own, so vague ones do nothing); keep the others.`
 }
 
-export function routerContext(w: Workspace, o: { threadId: string; permalink: string; workers: WorkerRow[]; persona: string; reports: WorkerReports; trigger?: Trigger; unfollowAfter?: number }): string {
+export function routerContext(w: Workspace, o: { threadId: string; permalink: string; workers: WorkerRow[]; persona: string; reports: WorkerReports; trigger?: Trigger; unfollowAfter?: number; skills?: Skill[] }): string {
   const workers = o.workers.length ? o.workers.map(x => `- ${x.key} "${x.title}": ${x.summary || '(no summary)'}`).join('\n') : '- (none yet)'
+  const skills = o.skills?.length ? o.skills.map(x => `- ${x.name}${x.description ? `: ${x.description}` : ''}`).join('\n') : '- (none)'
   return `mmhub context (refreshed at every start/resume):
 Workspace "${w.name}" at ${w.dir}${w.description ? ` — ${w.description}` : ''}
 Your thread: ${o.threadId} (${o.permalink})
@@ -156,6 +158,10 @@ Repos:
 ${repoLines(w)}
 Workers (call list_workers for live status):
 ${workers}
+
+What workers can do that you can't: you only read Mattermost and the files here, with no logins. Workers run a full Claude Code on this machine: commands, web pages and logged-in services with the accounts this machine has (a Google Sheet, a dashboard, an API), files, and the skills below. Delegate anything that needs one of those, naming the skill when one fits. Never decide from your own try that a link, file or service is out of reach, and never tell a person something can't be done or accessed before a worker has tried.
+Skills workers have (the bot's accounts and access come with them):
+${skills}
 
 What you post in the thread (the current rules; they replace anything earlier about what to post or how workers report):
 ${routerPostingRules(o.reports)}
