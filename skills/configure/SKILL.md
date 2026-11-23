@@ -138,7 +138,14 @@ Steps:
      `<state>/providers/<name>/secrets/<VAR>` (file 0600, folders 0700); it never
      goes into argv, status.json, the hub log or a Mattermost post.
 3. **Check it**: `mmhub provider check <name>` (asks `claude auth status` with the
-   provider's settings; prints no secret).
+   provider's settings; prints no secret). With the hub running it asks twice: in
+   the hub's tmux, launched as a session is (`hub sessions:`, what decides whether
+   sessions work), and in the user's shell (`this shell:`). On macOS the two can
+   see different copies of a login (the keychain item, which claude under the
+   hub's tmux reads first, and `.credentials.json`, which a claude that can't reach
+   the keychain, over SSH say, uses). When the hub's sessions aren't signed in it
+   prints the `tmux -L … new-session` command to sign in where they run; the user
+   runs it in their own terminal, then `/login`, `/exit` and `mmhub provider reset <name>`.
 4. **Put it in a chain**: hub-wide `mmhub provider use --hub <first> <second> …`
    (include `default` to fall back to the hub's own login), or per workspace with
    `/mattermost-hub:workspace providers`. The running hub picks up the change at

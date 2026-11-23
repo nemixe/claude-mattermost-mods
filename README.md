@@ -575,6 +575,16 @@ model-not-found never switch. `!ws`, `mmhub status` and the panel show each work
 active provider and whether it is a fallback; `mmhub provider reset <name>` tries a
 fixed one again now. Setup steps: `/mattermost-hub:configure providers`.
 
+`mmhub provider check <name>` asks `claude auth status` where the provider's sessions
+run: in a throwaway session in the hub's tmux, with a session's environment and the
+provider's launch (`hub sessions:`), and in your shell (`this shell:`). They can
+differ: on macOS Claude Code keeps a login both in the keychain and in
+`~/.claude/.credentials.json`; a claude under the hub's tmux reads the keychain item
+first, while one that can't reach the keychain (over SSH, say) uses the file. When
+the hub's sessions aren't signed in, it fails and prints the command that signs in
+inside the hub's tmux (`tmux -L mmhub new-session -s mmhub-login claude`, then
+`/login`). A `claude setup-token` provider (`oauth-token`) has neither copy to drift.
+
 ## How sessions are launched
 
 | | router | worker |

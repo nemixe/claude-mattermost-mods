@@ -14,6 +14,7 @@ import { ROOT } from '../shared/paths'
 import type { HubSnapshot, CloseReason, ProviderLink, WorkspaceProvider } from '../shared/snapshot'
 import { chunk, errMsg, fmtAge, log, MAX_POST_CHARS, safeName, shortId } from '../shared/util'
 import { AccessStore, issuePairingCode, ownerNeedsBotCheck, pruneExpired } from './access'
+import { authStatusInTmux, type AuthStatus } from './authcheck'
 import { BackgroundTasks, type BackgroundTask } from './background'
 import type { HubConfig } from './config'
 import { loadConfig } from './config'
@@ -32,7 +33,7 @@ import { answeredText, PermissionDesk, promptText, staleText } from './permissio
 import { cleanupJob, routerContext, routerPersona, routerPrompt, workerContext, workerPrompt } from './prompts'
 import {
   baseConfigDir, buildLaunch, chooseProvider, configDirOf, cooling, DEFAULT_PROVIDER, kindOf, knownConfigDirs, loadProviders, markFailed, markOk,
-  providerChain, providerFault, redact, resetTime, startupProblem, syncTranscript, unusableReason,
+  providerChain, providerFault, readSecret, redact, resetTime, startupProblem, syncTranscript, unusableReason,
   type Choice, type FaultKind, type Health, type ProviderDef,
 } from './providers'
 import { claudeArgs, tmuxName, transcriptPath, wrapArgv, writeProviderEnv, writeSessionFiles } from './spawn'
@@ -374,6 +375,28 @@ export class Hub {
     return loadProviders(this.p.dir)
   }
 
+  /** The environment every claude the hub starts gets (the provider's own comes on top, through the launch wrapper). */
+  private claudeEnv(): Record<string, string> {
+    const env: Record<string, string> = { PATH: this.cfg.path ?? process.env.PATH ?? '/usr/bin:/bin' }
+    if (process.env.CLAUDE_CONFIG_DIR) env.CLAUDE_CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR
+    return env
+  }
+
+  /** `claude auth status` for a provider, run where its sessions run: in the hub's tmux, launched as a session is. */
+  async authStatus(name: string): Promise<AuthStatus> {
+    const defs = this.providerDefs()
+    if (name !== DEFAULT_PROVIDER && !defs[name]) throw new Error(`no provider ${name}`)
+    const launch = buildLaunch(this.p.dir, name, defs[name])
+    let providerEnv: Record<string, string> | undefined
+    if (launch.kind !== DEFAULT_PROVIDER) {
+      providerEnv = { ...launch.env }
+      // Sessions get the key through apiKeyHelper; auth status only reports what it would use, so it gets it in its env.
+      const key = launch.apiKeyHelper ? readSecret(this.p.dir, name, 'ANTHROPIC_API_KEY') : undefined
+      if (key) providerEnv.ANTHROPIC_API_KEY = key
+    }
+    return authStatusInTmux(this.tmux, { claudeBin: this.deps.claudeBin, cwd: this.p.dir, env: this.claudeEnv(), providerEnv })
+  }
+
   chainOf(w: Workspace): string[] {
     return providerChain(this.cfg.providers, w.providers)
   }
@@ -675,10 +698,9 @@ export class Hub {
       MMHUB_SPAWN: l.spawnId,
       MMHUB_ROLE: row.role,
       MMHUB_STATE_DIR: this.p.dir,
-      PATH: this.cfg.path ?? process.env.PATH ?? '/usr/bin:/bin',
+      ...this.claudeEnv(),
       CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
     }
-    if (process.env.CLAUDE_CONFIG_DIR) env.CLAUDE_CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR
 
     l.starting = true
     l.ready = false

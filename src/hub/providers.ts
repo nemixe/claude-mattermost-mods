@@ -156,7 +156,7 @@ export function hasSecret(stateDir: string, name: string, variable: string): boo
   }
 }
 
-function readSecret(stateDir: string, name: string, variable: string): string | undefined {
+export function readSecret(stateDir: string, name: string, variable: string): string | undefined {
   try {
     return readFileSync(secretFile(stateDir, name, variable), 'utf8').replace(/\r?\n$/, '') || undefined
   } catch {

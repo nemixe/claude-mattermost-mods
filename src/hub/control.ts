@@ -28,9 +28,18 @@ export async function control(hub: Hub, op: string, args: Record<string, unknown
     }
     case 'provider': {
       // reset: forget a provider's failures (it was fixed) · changed: providers.json or a chain changed
+      // check: is it signed in, as its sessions see it (off the chain: it takes seconds)
       const sub = String(args.op ?? '')
       const name = String(args.name ?? '')
-      if (sub !== 'reset' && sub !== 'changed') return { ok: false, message: `unknown provider op ${sub.slice(0, 20)} (reset|changed)` }
+      if (sub === 'check') {
+        try {
+          const a = await hub.authStatus(name)
+          return { ok: true, message: a.text, data: { loggedIn: a.loggedIn } }
+        } catch (err) {
+          return { ok: false, message: errMsg(err) }
+        }
+      }
+      if (sub !== 'reset' && sub !== 'changed') return { ok: false, message: `unknown provider op ${sub.slice(0, 20)} (reset|changed|check)` }
       const res = await hub.enqueue(async (): Promise<ControlResult> => {
         hub.reloadConfig()
         const had = sub === 'reset' ? hub.resetProvider(name) : false

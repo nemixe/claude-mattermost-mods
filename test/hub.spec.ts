@@ -47,8 +47,15 @@ class FakeTmux {
   launches: { name: string; argv: string[]; env: Record<string, string> }[] = []
   async newSession(o: { name: string; cwd: string; argv: string[]; env: Record<string, string> }) {
     this.alive.add(o.name)
+    // A login check runs its command, as tmux would (with only the env it was given).
+    if (o.name.startsWith('mmhub-auth-')) {
+      this.authChecks.push({ name: o.name, argv: o.argv, env: o.env })
+      Bun.spawn(o.argv, { cwd: o.cwd, env: o.env, stdin: 'ignore', stdout: 'ignore', stderr: 'ignore' })
+      return
+    }
     this.launches.push({ name: o.name, argv: o.argv, env: o.env })
   }
+  authChecks: { name: string; argv: string[]; env: Record<string, string> }[] = []
   async has(n: string) { return this.alive.has(n) }
   async kill(n: string) { return this.alive.delete(n) }
   /** What the pane shows (a startup banner, say); empty by default. */
@@ -63,7 +70,7 @@ class FakeTmux {
 
 type Post = { id: string; root_id?: string; channel_id?: string; message: string }
 
-function setup(config: Record<string, unknown> = {}, before?: (stateDir: string) => void) {
+function setup(config: Record<string, unknown> = {}, before?: (stateDir: string) => void, deps: { claudeBin?: string } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'mmhub-hub-'))
   const p = paths(join(dir, 'state'))
   mkdirSync(p.sessions, { recursive: true })
@@ -111,7 +118,7 @@ function setup(config: Record<string, unknown> = {}, before?: (stateDir: string)
   }
   const hub = new Hub({
     paths: p, mm: mm as unknown as Mattermost, tmux: tmux as unknown as Tmux,
-    claudeBin: '/bin/claude', bunBin: process.execPath, version: 'test', cliPath: '/cli.ts',
+    claudeBin: '/bin/claude', bunBin: process.execPath, version: 'test', cliPath: '/cli.ts', ...deps,
   })
   hub.store.insertThread({ id: 'T1', channelId: 'C1', workspace: 'demo', routerKey: 'r-t1', label: 'thread one', cursor: 0, createdAt: 0 })
   return { hub, tmux, posts, others, w, typing, p, reconnects }
@@ -1860,5 +1867,36 @@ describe('scheduled jobs', () => {
 
     expect(await say('@claude !cron rm 1')).toContain('🗑 Removed scheduled job #1')
     expect(await say('@claude !cron rm 1')).toContain('⚠️ no job #1')
+  }, T)
+})
+
+describe("checking a provider's login where its sessions run", () => {
+  // A stand-in for claude: signed in with whatever credential reached it; shows its PATH.
+  const bin = mkdtempSync(join(tmpdir(), 'mmhub-authbin-'))
+  const claude = join(bin, 'claude')
+  writeFileSync(claude, `#!/bin/sh
+li=false; m=none
+[ -n "$ANTHROPIC_API_KEY" ] && { li=true; m="api_key:$ANTHROPIC_API_KEY"; }
+[ -n "$CLAUDE_CODE_OAUTH_TOKEN" ] && { li=true; m="oauth_token:$CLAUDE_CODE_OAUTH_TOKEN"; }
+printf '{"loggedIn": %s, "authMethod": "%s", "apiProvider": "firstParty", "orgName": "%s"}\\n' "$li" "$m" "$PATH"
+`, { mode: 0o755 })
+
+  test("each provider is launched as its sessions are: the session's PATH, its secret through the wrapper; mmhub asks through control", async () => {
+    const { hub, tmux } = setup({ path: '/opt/hub/bin:/usr/bin:/bin' }, dir => {
+      saveProviders(dir, { tok: { kind: 'oauth-token' }, key: { kind: 'api-key' } })
+      writeSecret(dir, 'tok', 'CLAUDE_CODE_OAUTH_TOKEN', 'oat-SECRET')
+      writeSecret(dir, 'key', 'ANTHROPIC_API_KEY', 'sk-ant-api03-SECRET')
+    }, { claudeBin: claude })
+
+    expect(await hub.authStatus('default')).toEqual({ loggedIn: false, text: 'not signed in · auth none · API firstParty (/opt/hub/bin:/usr/bin:/bin)' })
+    expect(tmux.authChecks[0]!.argv).not.toContain('mmhub-launch') // the hub's own login: no provider wrapper
+    expect(await hub.authStatus('tok')).toMatchObject({ loggedIn: true, text: expect.stringContaining('auth oauth_token:oat-SECRET') })
+    expect(await hub.authStatus('key')).toMatchObject({ loggedIn: true, text: expect.stringContaining('auth api_key:sk-ant-api03-SECRET') })
+    expect(JSON.stringify(tmux.authChecks)).not.toContain('SECRET')
+    expect(tmux.launches).toEqual([]) // no session was started for it
+    await expect(hub.authStatus('nope')).rejects.toThrow('no provider nope')
+
+    expect(await control(hub, 'provider', { op: 'check', name: 'tok' }, () => {})).toMatchObject({ ok: true, data: { loggedIn: true } })
+    expect(await control(hub, 'provider', { op: 'check', name: 'nope' }, () => {})).toEqual({ ok: false, message: 'no provider nope' })
   }, T)
 })

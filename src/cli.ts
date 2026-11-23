@@ -48,7 +48,8 @@
  *                                   kinds: login | oauth-token | api-key | gateway | bedrock | vertex | foundry
  *   mmhub provider login <name>                  the command you run yourself to sign a login provider in
  *   mmhub provider secret <name> <VAR> [--unset] store a secret, read from stdin (hidden at a terminal)
- *   mmhub provider check <name>                  validate it and ask `claude auth status` with its settings
+ *   mmhub provider check <name>                  validate it and ask `claude auth status` with its settings, in the
+ *                                                hub's tmux (what its sessions see) and in this shell
  *   mmhub provider use <workspace|--hub> <name>… | <workspace> --inherit
  *                                                set the fallback chain ("default" = the hub's own login)
  *   mmhub provider reset <name>                  forget its failures, so it is tried again now
@@ -80,7 +81,8 @@ import {
   loginCommand, loginState, PROVIDER_KINDS, providerChain, removeProviderFiles, saveProviders, secretNames, unusableReason, validateDef, writeSecret,
   type Health, type ProviderDef,
 } from './hub/providers'
-import { PROVIDER_UNSET } from './hub/spawn'
+import { PROVIDER_UNSET, shq } from './hub/spawn'
+import { readAuthStatus, type AuthStatus } from './hub/authcheck'
 import { addRepo, bindChannel, channelsOf, effective, setWorkspaceTrigger, createWorkspace, ensureTemplate, listWorkspaces, loadBindings, loadWorkspace, removeRepo, setWorkspaceProviders, TEMPLATE_DIR, unbindChannel, validName } from './hub/workspaces'
 
 const argv = process.argv.slice(2)
@@ -917,25 +919,48 @@ async function provider(): Promise<never> {
         if (key) env.ANTHROPIC_API_KEY = key
       }
       const claude = cfg.claudeBin ?? Bun.which('claude', { PATH: cfg.path ?? process.env.PATH ?? '' })
-      let auth = 'claude not found'
+      // What this shell sees …
+      let local: AuthStatus = { text: 'claude not found' }
       if (claude) {
         const r = Bun.spawnSync([claude, 'auth', 'status', '--json'], { env, stdout: 'pipe', stderr: 'pipe', timeout: 30_000 })
-        try {
-          const s = JSON.parse(r.stdout.toString()) as { loggedIn?: boolean; authMethod?: string; apiProvider?: string; email?: string; orgName?: string; subscriptionType?: string }
-          auth = `${s.loggedIn ? 'signed in' : 'not signed in'} · auth ${s.authMethod ?? '?'} · API ${s.apiProvider ?? '?'}${s.email ? ` · ${s.email}` : ''}${s.orgName ? ` (${s.orgName})` : ''}${s.subscriptionType ? ` · ${s.subscriptionType}` : ''}`
-        } catch {
-          auth = `claude auth status failed: ${r.stderr.toString().trim().split('\n').pop() ?? `exit ${r.exitCode}`}`
-        }
+        local = readAuthStatus(r.stdout.toString(), r.stderr.toString(), r.exitCode)
       }
+      // … and what the hub's sessions see: on macOS the two can read different copies of a login (authcheck.ts).
+      let hub: AuthStatus | undefined
+      let hubNote: string | undefined
+      if (await hubRunning()) {
+        try {
+          const r = await controlOp('provider', { op: 'check', name })
+          if (r.ok) hub = { loggedIn: (r.data as { loggedIn?: boolean } | undefined)?.loggedIn, text: r.text ?? '' }
+          else hubNote = `couldn't ask the hub: ${r.text ?? 'no answer'}`
+        } catch (err) {
+          hubNote = `couldn't ask the hub: ${errMsg(err)}`
+        }
+      } else {
+        hubNote = "the hub isn't running, so this is only what this shell sees; its sessions can see another login. Start it and check again"
+      }
+      const kind = def?.kind ?? 'default'
+      // Kinds whose sessions can't run without a sign-in `auth status` reports (bedrock & co. answer for their cloud, not here).
+      const signInKind = kind === 'default' || kind === 'login' || kind === 'oauth-token' || kind === 'api-key'
+      const signedOut = signInKind && hub?.loggedIn === false
       const health = readHealth()[name]
+      const tmuxLogin = `tmux -L ${shq(cfg.tmuxSocket)} new-session -s mmhub-login ${launch.configDir ? `-e CLAUDE_CONFIG_DIR=${shq(launch.configDir)} ` : ''}${shq(claude ?? 'claude')}`
       const lines = [
-        `${name} (${def?.kind ?? 'default'}): ${errs.length ? `✗ ${errs.join('; ')}` : why ? `✗ ${why}` : '✓ usable'}`,
-        `  claude: ${auth}`,
+        `${name} (${kind}): ${errs.length ? `✗ ${errs.join('; ')}` : why ? `✗ ${why}` : signedOut ? "✗ its sessions aren't signed in" : '✓ usable'}`,
+        ...(hub ? [`  hub sessions: ${hub.text}`] : []),
+        `  this shell:   ${local.text}`,
+        ...(hubNote ? [`  (${hubNote})`] : []),
+        ...(hub && local.loggedIn !== undefined && hub.loggedIn !== undefined && hub.loggedIn !== local.loggedIn
+          ? ['  ⚠ the hub\'s sessions and this shell see different logins (on macOS: the keychain item, which claude under the hub\'s tmux reads first, and the .credentials.json file, which a claude that can\'t reach the keychain uses)']
+          : []),
+        ...(signedOut && (kind === 'default' || kind === 'login')
+          ? [`  → sign it in where its sessions run: ${tmuxLogin}  — then /login, /exit once signed in, and mmhub provider reset ${name}`]
+          : []),
         ...(launch.configDir ? [`  CLAUDE_CONFIG_DIR ${launch.configDir}`] : []),
         ...(secretNames(p.dir, name).length ? [`  secrets: ${secretNames(p.dir, name).join(', ')}`] : []),
         ...(cooling(health, now) ? [`  ⏸ resting ${fmtAge(health!.coolUntil! - now)} after ${health!.fault} (${health!.reason ?? ''}) — mmhub provider reset ${name} once fixed`] : []),
       ]
-      const ok = !errs.length && !why
+      const ok = !errs.length && !why && !signedOut
       if (json) out(ok, lines.join(' | '))
       console.log(lines.join('\n'))
       process.exit(ok ? 0 : 1)
