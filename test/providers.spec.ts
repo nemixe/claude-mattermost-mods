@@ -116,6 +116,17 @@ describe('startup screens', () => {
     expect(startupProblem('OAuth token revoked · Please run /login')?.fault).toBe('auth')
   })
 
+  test('a resumed conversation replaying an old sign-in error is not a problem', () => {
+    const resumed = [
+      ' ▐▛███▛█   Claude Code v2.1.331',
+      '▝▜██████▀  Opus 5.5 with medium effort · Claude Ultra',
+      '← mmhub · rafel.ami: Hi',
+      '⏺ Login reached its time limit · Please run /login',
+      '❯ ',
+    ].join('\n')
+    expect(startupProblem(resumed)).toBeUndefined()
+  })
+
   test('a normal start, and the dev-channel dialog, are not problems', () => {
     expect(startupProblem(' ▐▛███▛█   Claude Code v2.1.325\n▝▜██████▀  Opus 5.5 · Claude Max\n❯ ')).toBeUndefined()
     expect(startupProblem('Loading development channels\n❯ 1. I am using this for local development')).toBeUndefined()

@@ -450,7 +450,10 @@ export function startupProblem(screen: string): { fault: FaultKind; reason: stri
     return { fault: 'channels', reason: /third-party/i.test(screen) ? 'no channels on third-party providers' : /org policy/i.test(screen) ? 'channels blocked by org policy' : 'channels not available' }
   }
   if (/Choose the text style|Select login method/i.test(screen)) return { fault: 'auth', reason: 'not signed in (login screen at startup)' }
-  const m = /Not logged in|Please run \/login|Run \/login|Invalid API key|Invalid auth token|OAuth token revoked|Login expired|Login reached its time limit|Authentication required|disabled API key authentication/i.exec(screen)
+  // A resumed session replays its conversation, old sign-in errors included (⏺ lines):
+  // those say nothing about this start. A turn that fails now is caught by turnFailed.
+  const own = screen.split('\n').filter(line => !/^\s*⏺/.test(line)).join('\n')
+  const m = /Not logged in|Please run \/login|Run \/login|Invalid API key|Invalid auth token|OAuth token revoked|Login expired|Login reached its time limit|Authentication required|disabled API key authentication/i.exec(own)
   if (m) return { fault: 'auth', reason: m[0] }
   return undefined
 }
