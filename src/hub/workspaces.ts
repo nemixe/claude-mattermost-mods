@@ -17,7 +17,7 @@
  * New workspaces are copied from <workspacesDir>/workspace-template/ (see ensureTemplate).
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs'
 import { basename, dirname, isAbsolute, join, resolve } from 'path'
 import { expandHome } from '../shared/paths'
 import { readJson, slug, writeJsonAtomic } from '../shared/util'
@@ -243,40 +243,87 @@ export function createWorkspace(cfg: HubConfig, name: string, description?: stri
   return w
 }
 
-async function run(argv: string[], cwd?: string): Promise<{ code: number; out: string }> {
-  const p = Bun.spawn(argv, { cwd, stdout: 'pipe', stderr: 'pipe', stdin: 'ignore' })
-  const [o, e, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited])
-  return { code, out: (o + e).trim() }
+async function run(argv: string[], o: { cwd?: string; env?: Record<string, string | undefined>; timeoutMs?: number } = {}): Promise<{ code: number; out: string }> {
+  const p = Bun.spawn(argv, { cwd: o.cwd, env: o.env, stdout: 'pipe', stderr: 'pipe', stdin: 'ignore' })
+  let timedOut = false
+  const timer = o.timeoutMs ? setTimeout(() => ((timedOut = true), p.kill()), o.timeoutMs) : undefined
+  const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited])
+  if (timer) clearTimeout(timer)
+  const text = (out + err).trim()
+  return timedOut ? { code: -1, out: `timed out after ${Math.round(o.timeoutMs! / 60_000)} min${text ? `: ${text}` : ''}` } : { code, out: text }
 }
 
-function looksLikeUrl(s: string): boolean {
+export function looksLikeUrl(s: string): boolean {
   return /^(https?:\/\/|git@|ssh:\/\/)/.test(s)
 }
 
-/** Add a local folder, or clone a git URL into <ws>/repos/<name>. */
-export async function addRepo(cfg: HubConfig, wsName: string, source: string, name?: string): Promise<RepoRef> {
+/** A URL without the user and password it may carry (for logs and messages). */
+export function redactUrl(s: string): string {
+  return s.replace(/(\/\/)[^/@\s]+@/g, '$1…@')
+}
+
+/** The folder a repo source names (undefined: a git URL). */
+export function localRepoPath(source: string): string | undefined {
+  return looksLikeUrl(source) ? undefined : resolve(expandHome(source))
+}
+
+/** git that never waits for a person: no password prompts, ssh in batch mode unless ssh is set up otherwise. */
+async function unattendedEnv(git: string): Promise<Record<string, string | undefined>> {
+  const env: Record<string, string | undefined> = { ...process.env, GIT_TERMINAL_PROMPT: '0' }
+  if (!env.GIT_SSH_COMMAND && !env.GIT_SSH) {
+    const c = await run([git, 'config', '--get', 'core.sshCommand'])
+    if (c.code !== 0 || !c.out) env.GIT_SSH_COMMAND = 'ssh -o BatchMode=yes'
+  }
+  return env
+}
+
+/**
+ * Add a local folder, or clone a git URL into <ws>/repos/<name>. `unattended`: for
+ * the hub (no one to answer git's prompts), with a time limit on the clone.
+ */
+export async function addRepo(cfg: HubConfig, wsName: string, source: string, name?: string, o: { unattended?: boolean; timeoutMs?: number } = {}): Promise<RepoRef> {
   const w = loadWorkspace(cfg, wsName)
   if (!w) throw new Error(`no workspace named ${wsName}`)
+  const taken = (ws: Workspace, repo: RepoRef) => {
+    if (ws.repos.some(r => r.name === repo.name)) throw new Error(`workspace ${wsName} already has a repo named ${repo.name}`)
+    const same = ws.repos.find(r => resolve(r.path) === resolve(repo.path))
+    if (same) throw new Error(`workspace ${wsName} already has ${repo.path}, as repo ${same.name}`)
+  }
   let repo: RepoRef
-  if (looksLikeUrl(source)) {
-    const n = name ?? basename(source).replace(/\.git$/, '')
+  const local = localRepoPath(source)
+  if (!local) {
+    const n = name ?? basename(source.replace(/\/+$/, '')).replace(/\.git$/, '')
     if (!REPO_NAME_RE.test(n)) throw new Error(`invalid repo name: ${n}`)
     const dest = join(w.dir, 'repos', n)
+    taken(w, { name: n, path: dest })
     if (existsSync(dest)) throw new Error(`${dest} already exists`)
-    const r = await run([cfg.gitBin ?? 'git', 'clone', source, dest])
-    if (r.code !== 0) throw new Error(`git clone failed: ${r.out}`)
+    const git = cfg.gitBin ?? 'git'
+    const r = await run([git, 'clone', source, dest], o.unattended ? { env: await unattendedEnv(git), timeoutMs: o.timeoutMs } : {})
+    if (r.code !== 0) {
+      // Nothing was there before: a clone cut off leaves only its own leftovers.
+      rmSync(dest, { recursive: true, force: true })
+      throw new Error(`git clone failed: ${redactUrl(r.out)}`)
+    }
     repo = { name: n, path: dest }
   } else {
-    const p = resolve(expandHome(source))
+    const p = local
     if (!isAbsolute(p) || !existsSync(p) || !statSync(p).isDirectory()) throw new Error(`not a folder: ${p}`)
     const n = name ?? slug(basename(p), 64)
     if (!REPO_NAME_RE.test(n)) throw new Error(`invalid repo name: ${n}`)
     repo = { name: n, path: p }
   }
-  if (w.repos.some(r => r.name === repo.name)) throw new Error(`workspace ${wsName} already has a repo named ${repo.name}`)
-  w.repos.push(repo)
-  saveManifest(w)
+  // The manifest as it is now: a clone takes a while, and something else may have changed it meanwhile.
+  const now = loadWorkspace(cfg, wsName)
+  if (!now) throw new Error(`no workspace named ${wsName}`)
+  taken(now, repo)
+  now.repos.push(repo)
+  saveManifest(now)
   return repo
+}
+
+/** A folder added as a repo outside the workspace folder (routers and workers need --add-dir for it). */
+export function isExternal(w: Workspace, path: string): boolean {
+  return !(resolve(path) + '/').startsWith(resolve(w.dir) + '/')
 }
 
 /** Set what makes the bot take posts in a workspace's channels; undefined goes back to config.json's. */
@@ -311,8 +358,7 @@ export function removeRepo(cfg: HubConfig, wsName: string, name: string): boolea
 
 /** Repo folders outside the workspace folder (routers need --add-dir for these). */
 export function externalRepoPaths(w: Workspace): string[] {
-  const root = resolve(w.dir) + '/'
-  return w.repos.map(r => resolve(r.path)).filter(p => !(p + '/').startsWith(root))
+  return w.repos.map(r => resolve(r.path)).filter(p => isExternal(w, p))
 }
 
 // ---------------------------------------------------------------- worktrees

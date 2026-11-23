@@ -17,6 +17,7 @@ import { inDM, setFollowing } from './trigger'
 import type { MMPost } from './mattermost'
 import { checkBotMentions } from './bots'
 import { newThread } from './newthread'
+import { addRepoTool } from './addrepo'
 import { isDraft, type ThreadRow } from './store'
 import { effective, prepareWorktree } from './workspaces'
 import { listChannels, ownThread, postIdOf, readChannel, readOtherThread, searchMessages, threadText } from './explore'
@@ -400,6 +401,8 @@ async function callTool(hub: Hub, key: string, tool: string, a: Args): Promise<s
       return sendDM(hub, key, { user: str(a, 'user', false), text: str(a, 'text')!, threadId: str(a, 'thread_id', false) })
     case 'new_thread':
       return newThread(hub, key, { text: str(a, 'text')!, messageId: str(a, 'message_id')!, channel: str(a, 'channel', false) })
+    case 'add_repo':
+      return addRepoTool(hub, key, { source: str(a, 'source')!, name: str(a, 'name', false), messageId: str(a, 'message_id', false) })
     case 'answer_request':
       return answerRequest(hub, key, { text: str(a, 'text')!, verbatim: str(a, 'verbatim', false) })
     case 'schedule':

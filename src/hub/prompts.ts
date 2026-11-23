@@ -128,7 +128,7 @@ export function workerReportingRules(reports: WorkerReports): string {
 }
 
 function repoLines(w: Workspace): string {
-  return w.repos.length ? w.repos.map(r => `- ${r.name}: ${r.path}`).join('\n') : '- (no repos yet — an owner adds them with `mmhub repo add`)'
+  return w.repos.length ? w.repos.map(r => `- ${r.name}: ${r.path}`).join('\n') : '- (no repos yet — an owner adds them with `mmhub repo add`, or asks a router in a thread)'
 }
 
 /** How posts reach a workspace's sessions, when Laya or mention-only decides (empty otherwise). */
@@ -156,6 +156,7 @@ Your thread: ${o.threadId} (${o.permalink})
 Knowledge: ${w.dir}/knowledge
 Repos:
 ${repoLines(w)}
+When a hub owner asks you to add a repo to the workspace (a folder on this machine or a git URL), add it with add_repo, passing their message_id.
 Workers (call list_workers for live status):
 ${workers}
 

@@ -60,6 +60,8 @@ Arguments passed: `$ARGUMENTS`
 - **`repo add <workspace> <path|git-url> [name]`**: `mmhub repo add <ws> <src> --name <name>`.
   A local path is used in place (workers still get their own worktrees); a URL is cloned
   into `repos/`. **`repo rm <workspace> <name>`**: `mmhub repo rm` (files untouched).
+  Owners can also ask the bot in a thread of the workspace ("add ~/code/app to this
+  workspace"): its router adds it (`add_repo`).
 - **`set <workspace> <key> <value>`**: edit `workspace.json` — `routerModel`, `workerModel`,
   `workerPermissionMode`, `idleMinutes.router`, `idleMinutes.worker`, `cleanupHours` (hours
   without work before a worker cleans up its processes, containers, images and build output;

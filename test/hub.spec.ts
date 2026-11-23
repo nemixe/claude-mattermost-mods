@@ -7,7 +7,7 @@
 // opens, so a start takes ~1.5 s (the shepherd's polling).
 
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { dirname, join } from 'path'
 import type { HubMsg } from '../src/shared/ipc'
@@ -19,6 +19,7 @@ import { control } from '../src/hub/control'
 import { addJob, runDueJobs } from '../src/hub/jobs'
 import { otherAgentCheck } from '../src/hub/agents'
 import { workspaceTitle } from '../src/hub/links'
+import { addRepoTool } from '../src/hub/addrepo'
 import { RETRY_DELAYS } from '../src/hub/lifecycle'
 import type { Mattermost, MMPost } from '../src/hub/mattermost'
 import { tmuxName, transcriptPath } from '../src/hub/spawn'
@@ -1537,6 +1538,108 @@ describe('reading Mattermost beyond the thread', () => {
     hub.store.patchWorker(wkey, { threads: ['T2'] })
     await expect(handleCall(hub, wkey, 'fetch_thread', { thread_id: X1 })).rejects.toThrow('no person to read for')
     expect(await handleCall(hub, wkey, 'fetch_thread', { thread_id: X1, message_id: 'M1' })).toContain('Overtime is rounded wrong')
+  }, T)
+})
+
+describe('adding repos', () => {
+  /** Owner U1 (alice) asks router r-t2 to add a repo; bob (U2) too. git is a fake that clones by making a folder. */
+  function scene() {
+    const tools = mkdtempSync(join(tmpdir(), 'mmhub-git-'))
+    const git = join(tools, 'git')
+    writeFileSync(git, [
+      '#!/bin/sh',
+      'if [ "$1" = config ]; then exit 1; fi',
+      'case "$2" in',
+      '  *fail*) echo "fatal: could not read from $2" >&2; exit 128;;',
+      '  *slow*) sleep 1;;',
+      'esac',
+      'mkdir -p "$3/.git" && echo "$GIT_TERMINAL_PROMPT $GIT_SSH_COMMAND" > "$3/env"',
+    ].join('\n'), { mode: 0o755 })
+    const env = setup({ gitBin: git }, dir => {
+      writeFileSync(join(dir, 'access.json'), JSON.stringify({ dmPolicy: 'allowlist', allowFrom: ['U1'], channels: {}, pending: {} }))
+    })
+    const { hub, p, w, others } = env
+    hub.bot = { id: 'BOT', username: 'claude' }
+    bindChannel(p.bindings, 'C1', 'demo')
+    const rkey = hub.createRouter({ threadId: 'T2', channelId: 'C1', workspace: w, label: 'repos' })
+    const msg = (id: string, user: string, message: string) =>
+      ({ id, root_id: 'T2', user_id: user, channel_id: 'C1', message, create_at: Date.now(), props: {} }) as unknown as MMPost
+    others.push(msg('M1', 'U1', 'Add the app repo to this workspace'), msg('M2', 'U2', 'and my dotfiles'))
+    return { ...env, rkey, tools }
+  }
+
+  test("an owner asks a router: a git URL is cloned into the workspace, a folder outside it is added and the sessions that need it restart", async () => {
+    const { hub, tmux, posts, w, p, rkey, tools } = scene()
+    const add = (source: string, message_id = 'M1', name?: string) => handleCall(hub, rkey, 'add_repo', { source, message_id, ...(name ? { name } : {}) })
+    const repos = () => loadWorkspace(hub.cfg, 'demo')!.repos.map(r => r.name)
+    // The router at work for alice, another router of the workspace and a worker, both idle.
+    await hub.enqueue(() => hub.deliver(rkey, 'Add the app repo to this workspace', { chat_id: 'C1', thread_id: 'T2' }))
+    const rb = await connect(hub, tmux, rkey, 1)
+    const other = hub.createRouter({ threadId: 'T3', channelId: 'C1', workspace: w, label: 'other' })
+    await hub.enqueue(() => hub.deliver(other, 'hi', { chat_id: 'C1', thread_id: 'T3' }))
+    await connect(hub, tmux, other, 2)
+    await hook(hub, other, 'Stop')
+    const { key: wkey } = worker(hub, w)
+    await hub.enqueue(() => hub.ensureStarted(wkey))
+    await connect(hub, tmux, wkey, 3)
+    await hook(hub, wkey, 'Stop')
+
+    // Refused: not an owner's message, none, a worker, a relative path, the hub's own state, Claude's config, every workspace, another workspace.
+    await expect(add('https://github.com/org/api.git', 'M2')).rejects.toThrow('only a hub owner can add repos to the workspace')
+    await expect(handleCall(hub, rkey, 'add_repo', { source: 'https://github.com/org/api.git' })).rejects.toThrow('pass message_id')
+    await expect(handleCall(hub, wkey, 'add_repo', { source: tools, message_id: 'M1' })).rejects.toThrow('routers only')
+    await expect(add('code/app')).rejects.toThrow("pass the folder's full path")
+    await expect(add(p.dir)).rejects.toThrow("is part of the hub's own state")
+    await expect(add(dirname(p.dir))).rejects.toThrow("holds the hub's own state")
+    await expect(add(process.env.CLAUDE_CONFIG_DIR!)).rejects.toThrow("Claude Code's settings and logins")
+    await expect(add(hub.cfg.workspacesDir)).rejects.toThrow('holds every workspace')
+    const elsewhere = createWorkspace(hub.cfg, 'elsewhere')
+    await expect(add(elsewhere.dir)).rejects.toThrow('inside another workspace')
+    expect(repos()).toEqual([])
+
+    // A git URL: cloned into the workspace's repos/, never waiting on a prompt. Routers read it already: nobody restarts.
+    const res = await add('https://bot:s3cret@github.com/org/api.git')
+    expect(res).toContain(`added repo "api" (${join(w.dir, 'repos', 'api')}) to workspace demo for @alice`)
+    expect(res).toContain('You can read it now')
+    expect(res).toContain('prepare_repo(repo="api")')
+    expect(readFileSync(join(w.dir, 'repos', 'api', 'env'), 'utf8').trim()).toBe('0 ssh -o BatchMode=yes')
+    expect(repos()).toEqual(['api'])
+    expect(tmux.launches.length).toBe(3)
+    await expect(add('https://github.com/org/api.git')).rejects.toThrow('already has a repo named api')
+    // A failed clone leaves nothing, and never shows the password in its URL.
+    const failed = add('https://bot:s3cret@github.com/org/fail.git')
+    await expect(failed).rejects.toThrow('git clone failed: fatal: could not read from https://…@github.com/org/fail.git')
+    expect(existsSync(join(w.dir, 'repos', 'fail'))).toBe(false)
+
+    // A clone longer than a tool call may wait goes on; the router hears when it is done.
+    const slow = await addRepoTool(hub, rkey, { source: 'https://github.com/org/slow.git', messageId: 'M1' }, 50)
+    expect(slow).toContain('it goes on, and you get a message (kind="repo_added")')
+    await until('the clone is reported', () => rb.got.some(m => m.meta.kind === 'repo_added'))
+    expect(rb.got.at(-1)!.content).toContain(`"slow" at ${join(w.dir, 'repos', 'slow')}`)
+    expect(repos()).toEqual(['api', 'slow'])
+
+    // A git repo outside the workspace: routers restart to read it (alice's after its turn), workers work in their own checkout.
+    const app = join(tools, 'app')
+    mkdirSync(join(app, '.git'), { recursive: true })
+    const r2 = await add(app)
+    expect(r2).toContain('you restart after this turn, with your memory, and so does 1 other live session of the workspace')
+    expect(hub.restartPending(rkey)).toBe(true)
+    expect(tmux.launches.map(l => l.name).slice(3)).toEqual([tmuxName(other)])
+    await expect(add(app, 'M1', 'app2')).rejects.toThrow(`already has ${app}, as repo app`)
+    await hook(hub, rkey, 'Stop')
+    await until('the router restarts', () => tmux.launches.length === 5)
+    expect(tmux.launches[4]!.argv.join(' ')).toContain(`--add-dir ${app}`)
+
+    // A folder that isn't a git repo: workers share it as it is, so they restart too.
+    await connect(hub, tmux, other, 4)
+    await connect(hub, tmux, rkey, 5)
+    const notes = join(tools, 'notes')
+    mkdirSync(notes)
+    expect(await add(notes)).toContain("It isn't a git repo: workers share the folder as it is")
+    await until('the worker restarts', () => tmux.launches.some((l, i) => i >= 5 && l.name === tmuxName(wkey)))
+    expect(tmux.launches.findLast(l => l.name === tmuxName(wkey))!.argv.join(' ')).toContain(`--add-dir ${notes}`)
+    expect(repos()).toEqual(['api', 'slow', 'app', 'notes'])
+    expect(posts).toEqual([]) // the router tells the person itself
   }, T)
 })
 

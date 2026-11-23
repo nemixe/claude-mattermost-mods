@@ -127,6 +127,15 @@ the `/mm` panel. The CLI is `bun ~/claude-mattermost-mods/bin/mmhub` (alias it t
   brings back the question.
 - `@claude every weekday at 9, check the alerts dashboard and post anything red` (an
   owner) → a scheduled job; each run opens its own thread ([Scheduled jobs](#scheduled-jobs)).
+- `@claude add ~/code/billing to this workspace` or `@claude add
+  https://github.com/acme/billing.git` (an owner) → the router adds the repo, like
+  `mmhub repo add`. A git URL is cloned into the workspace's `repos/` with this machine's
+  git login (never waiting on a password prompt; a clone over 2.5 minutes goes on, and the
+  router says when it's done). A folder outside the workspace folder needs a restart to be
+  read: the workspace's live routers restart gracefully (the asking one after its turn,
+  with its memory), and its workers too when the folder isn't a git repo. Not a folder
+  with the hub's state, Claude Code's config or `~/.ssh` in it or around it, the folder of
+  every workspace, or another workspace's folder.
 - Owner commands: `!ws`, `!workers`, `!wake [id]`, `!stop`, `!restart [id|all|workers|routers] [now]`,
   `!pin [id]`, `!unpin [id]`, `!worker stop|rm <id>`, `!delegate <id|new> <task>`,
   `!cron [add|show|rm|pause|resume|run …]`, `!help`.

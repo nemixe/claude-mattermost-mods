@@ -328,8 +328,8 @@ export function summary(hub: Hub, job: JobRow, now = Date.now()): string {
 
 // ---------------------------------------------------------------------------- sessions' tools
 
-/** The owner's message a session cites: in one of its threads, written by an owner. */
-async function ownerAsked(hub: Hub, key: string, messageId: string | undefined): Promise<{ thread: ThreadRow; who: string }> {
+/** The owner's message a session cites: in one of its threads, written by an owner. `what` only owners may do, for the refusal. */
+export async function ownerAsked(hub: Hub, key: string, messageId: string | undefined, what = 'set up or remove scheduled jobs'): Promise<{ thread: ThreadRow; who: string }> {
   if (!messageId) fail("pass message_id: the owner's message in your thread that asks for this")
   let post: MMPost
   try {
@@ -339,7 +339,7 @@ async function ownerAsked(hub: Hub, key: string, messageId: string | undefined):
   }
   const thread = hub.threadsOf(key).find(t => t.id === (post.root_id || post.id)) ?? fail(`message ${messageId} is not in your thread(s)`)
   if (post.user_id === hub.bot.id || !isOwner(hub.accessStore.load(), post.user_id, isBotPost(post))) {
-    fail('only a hub owner can set up or remove scheduled jobs, and that message is not from one. Tell the person an owner has to ask.')
+    fail(`only a hub owner can ${what}, and that message is not from one. Tell the person an owner has to ask.`)
   }
   return { thread, who: `@${await hub.mm.username(post.user_id)}` }
 }

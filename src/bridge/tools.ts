@@ -118,6 +118,15 @@ export function toolsFor(role: Role, reports: Reports = 'router'): Tool[] {
       },
       ...common(role),
       {
+        name: 'add_repo',
+        description: "Add a repo to this workspace when a hub owner asks: a folder on this machine (its full path) or a git URL, which the hub clones into the workspace's repos/ folder with this machine's git login. Owners only: pass message_id, the owner's message asking for it. A folder outside the workspace folder is read after a restart: you restart after this turn, with your memory. Workers then get their own checkout with prepare_repo. The hub posts nothing: tell the person yourself with reply.",
+        inputSchema: obj({
+          source: s('A folder on this machine ("/Users/me/code/app", "~/code/app") or a git URL ("https://github.com/org/app.git", "git@github.com:org/app.git")'),
+          name: s('Repo name in the workspace (default: from the folder or URL)'),
+          message_id: s("Id of the owner's message asking for it"),
+        }, ['source', 'message_id']),
+      },
+      {
         name: 'send_dm',
         description: "Ask a person privately (a hub owner, by username): for a decision or information you need from them away from your thread. Use sparingly — your thread is the normal place to ask. The hub hands your question to that person's own agent, which asks them in a DM and sends their answer back to you as a new message (kind=\"dm_reply\"); you never see the DM itself. Write what you need and why, self-contained: it may be posted to them as it is, so say who asks. Pass thread_id (instead of user) to ask more on a question you sent.",
         inputSchema: obj({

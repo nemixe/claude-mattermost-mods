@@ -65,7 +65,7 @@ export async function runCommand(hub: Hub, a: Extract<InboundAction, { kind: 'co
           `**Workspace ${w.name}**${w.description ? ` — ${w.description}` : ''}`,
           `Folder: \`${w.dir}\``,
           `Channels: ${channels.join(', ') || 'none'}`,
-          `Repos: ${w.repos.map(r => `\`${r.name}\``).join(', ') || 'none (add with `mmhub repo add`)'}`,
+          `Repos: ${w.repos.map(r => `\`${r.name}\``).join(', ') || 'none (add with `mmhub repo add`, or ask me in a thread)'}`,
           `Provider: ${hub.providerLine(w)}`,
           `Sessions: ${live.length} live / ${sessions.length} total`,
           ...live.map(s => `- ${sessionLine(hub, s.key)}`),
@@ -250,7 +250,7 @@ export async function answerWorkspace(hub: Hub, text: string, answer: MMPost): P
   for (const [tid, a] of [...hub.awaiting]) if (a.channelId === pending.channelId) hub.awaiting.delete(tid)
   hub.status.changed()
   const where = pending.channelType === 'D' ? 'This chat' : `~${hub.channelName(pending.channelId)}`
-  const repos = w.repos.length ? '' : ` Add repos with \`mmhub repo add ${w.name} <path|git-url>\` or \`/mattermost-hub:workspace\`.`
+  const repos = w.repos.length ? '' : ` Add repos with \`mmhub repo add ${w.name} <path|git-url>\` or \`/mattermost-hub:workspace\`, or ask me in a thread.`
   if (isWorkspaceAnswer(pending.post.message, hub)) {
     // The first message was itself an attempt to answer: nothing to work on yet.
     await hub.replyTo(answer, `🔗 ${where} is now connected to workspace **${w.name}** (\`${w.dir}\`).${repos}\nSend your request${pending.channelType === 'D' ? '' : ' (mention me)'} to start a thread.`)
