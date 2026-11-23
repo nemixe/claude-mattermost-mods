@@ -234,7 +234,7 @@ function sessionRow(s: SessionSnapshot, now: number): string {
   if (s.status === 'stopped' && s.closedAt) state = `stopped ${fmtAge(now - s.closedAt)} ago${s.closeReason ? ` (${s.closeReason})` : ''}`
   const flags = [
     s.pinned ? '📌' : '', s.attached ? '👁' : '', s.pendingPermissions ? `🔐${s.pendingPermissions}` : '', s.queuedTasks ? `${s.queuedTasks} queued` : '',
-    s.restartPending ? '↻ restart pending' : '', s.retryAt ? `⏳ retry in ${fmtAge(s.retryAt - now)}` : '',
+    s.background ? `⚙ ${s.background} in background` : '', s.restartPending ? '↻ restart pending' : '', s.retryAt ? `⏳ retry in ${fmtAge(s.retryAt - now)}` : '',
   ].filter(Boolean).join(' ')
   return `  ${icon} ${s.key.padEnd(11)} ${state.padEnd(30)} ${s.model.padEnd(7)} ${s.label}${flags ? `  ${flags}` : ''}`
 }

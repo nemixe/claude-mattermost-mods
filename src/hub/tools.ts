@@ -302,7 +302,7 @@ export async function queueTask(hub: Hub, key: string, thread: ThreadRow, text: 
   hub.status.changed()
 
   const queuePos = () => hub.store.pendingTasks(key).findIndex(t => t.id === taskId) + 1
-  if (hub.held(key) || hub.restartPending(key)) {
+  if (hub.held(key) || hub.restartWaits(key)) {
     // Waiting out an API-error retry, or a restart after the running turn: the task goes in after it.
     if (!hub.liveOf(key).ready) await hub.ensureStarted(key)
     return { worker_id: key, task_id: taskId, state: 'queued', position: queuePos() }

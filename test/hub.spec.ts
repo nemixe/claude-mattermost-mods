@@ -287,6 +287,63 @@ describe('typing indicator', () => {
   }, T)
 })
 
+describe('background work', () => {
+  test('typing stays up while work the session left running goes on; its notice runs a turn; idle close, cleanup and a graceful restart wait for it', async () => {
+    const { hub, tmux, w, typing } = setup()
+    const { key, taskId } = worker(hub, w)
+    await hub.enqueue(() => hub.ensureStarted(key))
+    const b = await connect(hub, tmux, key, 1)
+    const row = hub.store.session(key)!
+    const tp = transcriptPath(row.cwd, row.sessionId)
+    mkdirSync(dirname(tp), { recursive: true })
+    const at = (ms: number) => new Date(ms).toISOString()
+    // The turn starts a build in the background, then ends ("I'll report when it's done").
+    writeFileSync(tp, `${JSON.stringify({ type: 'user', timestamp: at(Date.now()), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'Command running in background with ID: bk1.' }] }, toolUseResult: { stdout: '', stderr: '', backgroundTaskId: 'bk1' } })}\n`)
+    await hook(hub, key, 'Stop')
+    expect(hub.store.task(taskId)!.state).toBe('ended')
+    expect(hub.store.session(key)!.status).toBe('idle')
+    expect(hub.backgroundOf(key).map(t => t.id)).toEqual(['bk1'])
+    typing.length = 0
+    hub.keepTyping()
+    expect(typing).toEqual(['C1/T1'])
+    expect(hub.snapshot().workspaces[0]!.sessions.find(s => s.key === key)!.background).toBe(1)
+
+    // Not closed for being idle, nor cleaned up, nor restarted under it.
+    hub.store.patchSession(key, { lastActiveAt: Date.now() - 48 * 3_600_000 })
+    await hub.enqueue(() => hub.reap())
+    expect(hub.store.session(key)!.status).toBe('idle')
+    expect(b.got.length).toBe(1) // no cleanup job
+    const r = await hub.enqueue(() => hub.restart(key))
+    expect(r.state).toBe('pending')
+    expect(r.message).toContain('once the work it runs in the background is done (1 task)')
+    expect(tmux.launches.length).toBe(1)
+    // New work doesn't wait for that restart: the background work holds it off anyway.
+    const more = await hub.enqueue(() => delegate(hub, { thread: hub.store.thread('T1')!, workerKey: key, task: 'and update the docs', messageIds: [] }))
+    expect(more.state).toBe('delivered')
+    await hook(hub, key, 'Stop')
+    expect(tmux.launches.length).toBe(1) // still running in the background
+
+    // The build ends: Claude Code queues its notice and starts a turn with it.
+    const done = Date.now() + 5
+    const note = '<task-notification>\n<task-id>bk1</task-id>\n<tool-use-id>toolu_1</tool-use-id>\n<status>completed</status>\n</task-notification>'
+    writeFileSync(tp, `${JSON.stringify({ type: 'queue-operation', operation: 'enqueue', timestamp: at(done), content: note })}\n${JSON.stringify({ type: 'user', timestamp: at(done), origin: { kind: 'task-notification' }, message: { role: 'user', content: note } })}\n`, { flag: 'a' })
+    await Bun.sleep(10)
+    typing.length = 0
+    hub.keepTyping()
+    await hub.enqueue(async () => {})
+    expect(hub.backgroundOf(key)).toEqual([])
+    expect(hub.store.session(key)!.status).toBe('busy') // its own turn, for the notice
+    hub.keepTyping()
+    expect(typing).toEqual(['C1/T1'])
+
+    // That turn ends: nothing runs any more, so the pending restart happens.
+    await hook(hub, key, 'Stop')
+    await connect(hub, tmux, key, 2)
+    expect(hub.restartPending(key)).toBe(false)
+    expect(hub.backgroundOf(key)).toEqual([]) // the new process starts with none
+  }, T)
+})
+
 /** A Stop hook the way the hub's socket answers it: the turn is sent back, or it ends. */
 async function stopWith(hub: Hub, key: string, text: string, active = false): Promise<string | undefined> {
   const block = hub.unpostedStop({ t: 'hook', key, event: 'Stop', stop_hook_active: active, text })

@@ -109,8 +109,13 @@ the `/mm` panel. The CLI is `bun ~/claude-mattermost-mods/bin/mmhub` (alias it t
   bot at all depends on the workspace's trigger: with `laya` or `openrouter`, thanks
   reach it only right after its own post.
 - While a router or worker is working for a thread, the bot shows as **typing…** there:
-  only while the session runs, not while it starts up, while Laya or OpenRouter judges a
-  reply, or while it waits for a 🔐 answer or an API-error retry.
+  while the session runs, and while work it left running in the background goes on (a
+  command run in the background, an async agent, a Monitor watch: its turn ended, the
+  work didn't). Not while it starts up, while Laya or OpenRouter judges a reply, or while
+  it waits for a 🔐 answer or an API-error retry. The hub reads that work from the
+  session's transcript; when it ends, the turn Claude Code starts for it shows as
+  typing too. Meanwhile the session isn't closed for being idle, cleaned up or evicted
+  (`mmhub status` shows `⚙ 1 in background`).
 - Worker permission prompts appear as 🔐 posts: owners reply `yes abcde` / `no abcde`
   or react ✅ / ❌. Pre-approve common commands in the workspace's `.claude/settings.json`.
 - **DM the bot** → your own workspace. The first DM from a chat that isn't connected to a
@@ -631,8 +636,10 @@ a session with the current settings (config, workspace `CLAUDE.md`, permission m
 and the same conversation. It happens right away if the session is idle, otherwise
 **after its current turn ends** — the work in progress is never cut off, and the status
 shows `restart after this turn` meanwhile. Messages and tasks that arrive meanwhile wait
-for the restarted session, so they get the new settings. `--now` / `!restart <id> now` / **Restart now**
-interrupts it instead; the cut-off work is re-delivered. `restart all|workers|routers`
+for the restarted session, so they get the new settings. Work the session left running in
+the background would die with its process, so the restart also waits for that to finish
+(new work goes in meanwhile, since it may take long). `--now` / `!restart <id> now` / **Restart now**
+interrupts it instead; the cut-off work is re-delivered (background work just stops). `restart all|workers|routers`
 does every live session (e.g. after editing `config.json` and `mmhub reload`).
 
 ## Development

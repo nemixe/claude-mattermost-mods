@@ -25,6 +25,8 @@ export type SnapshotInput = {
   queuedTasks: (key: string) => number
   inFlight: (key: string) => number
   restartPending: (key: string) => boolean
+  /** Tasks the session runs in the background. */
+  background?: (key: string) => number
   retryAt: (key: string) => number | undefined
   idleMinutes: (s: SessionRow) => number
   tmuxName: (key: string) => string
@@ -42,6 +44,7 @@ export function buildSnapshot(i: SnapshotInput): HubSnapshot {
     const view: ReapView = {
       key: s.key, role: s.role, workspace: s.workspace, status: s.status, pinned: s.pinned, lastActiveAt: s.lastActiveAt,
       attached: i.attached(s.key), pendingPermissions: i.pendingPermissions(s.key), inFlight: i.inFlight(s.key),
+      background: isLive(s.status) ? (i.background?.(s.key) ?? 0) : 0,
     }
     const t = threadByRouter.get(s.key)
     const w = workerByKey.get(s.key)
@@ -66,6 +69,7 @@ export function buildSnapshot(i: SnapshotInput): HubSnapshot {
     if (s.closedAt !== undefined && !isLive(s.status)) out.closedAt = s.closedAt
     if (s.closeReason && !isLive(s.status)) out.closeReason = s.closeReason
     if (i.restartPending(s.key)) out.restartPending = true
+    if (view.background) out.background = view.background
     const retry = i.retryAt(s.key)
     if (retry !== undefined) out.retryAt = retry
     const prov = isLive(s.status) ? i.sessionProvider?.(s.key) : undefined

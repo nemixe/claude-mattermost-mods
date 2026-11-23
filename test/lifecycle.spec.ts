@@ -86,6 +86,9 @@ describe('graceful restart', () => {
     expect(canRestartNow(v({ status: 'busy' }))).toBe(false)
     expect(canRestartNow(v({ inFlight: 1 }))).toBe(false)
     expect(canRestartNow(v({ pendingPermissions: 1 }))).toBe(false)
+    expect(canRestartNow(v({ background: 1 }))).toBe(false) // work left running would die with the process
+    expect(holdReason(s({ key: 'w-1', background: 2 }))).toBe('background work running')
+    expect(dueForIdleClose([s({ key: 'w-1', background: 1, lastActiveAt: 0 })], 10 * 3_600_000, () => 60)).toEqual([])
     expect(canRestartNow(v({ status: 'starting' }))).toBe(false)
   })
 })

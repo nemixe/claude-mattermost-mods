@@ -100,6 +100,13 @@ export class Tmux {
     return r.code === 0 ? r.stdout.split('\n').filter(Boolean).length : 0
   }
 
+  /** When the session was made (ms), i.e. when its claude process started. */
+  async createdAt(name: string): Promise<number | undefined> {
+    const r = await this.run(['display-message', '-p', '-t', `=${name}:`, '#{session_created}'])
+    const s = parseInt(r.stdout.trim(), 10)
+    return r.code === 0 && Number.isFinite(s) && s > 0 ? s * 1000 : undefined
+  }
+
   /** pid of the pane's process (the claude CLI). */
   async panePid(name: string): Promise<number | undefined> {
     const r = await this.run(['list-panes', '-t', `=${name}:`, '-F', '#{pane_pid}'])

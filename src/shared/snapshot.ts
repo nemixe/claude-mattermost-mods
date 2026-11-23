@@ -27,6 +27,8 @@ export type SessionSnapshot = {
   threadPermalinks: string[]
   /** A graceful restart waits for the current turn to end. */
   restartPending?: boolean
+  /** Work the session left running in the background (a command, an agent, a watch). */
+  background?: number
   /** An automatic retry after an API error is scheduled for this time. */
   retryAt?: number
   /** The provider a live session was launched with (it moves to the workspace's active one when it restarts). */

@@ -14,6 +14,7 @@ import { ROOT } from '../shared/paths'
 import type { HubSnapshot, CloseReason, ProviderLink, WorkspaceProvider } from '../shared/snapshot'
 import { chunk, errMsg, fmtAge, log, MAX_POST_CHARS, safeName, shortId } from '../shared/util'
 import { AccessStore, issuePairingCode, ownerNeedsBotCheck, pruneExpired } from './access'
+import { BackgroundTasks, type BackgroundTask } from './background'
 import type { HubConfig } from './config'
 import { loadConfig } from './config'
 import { answerWorkspace, askWorkspace, runCommand } from './commands'
@@ -30,11 +31,11 @@ import type { Mattermost, MMPost, MMReaction } from './mattermost'
 import { answeredText, PermissionDesk, promptText, staleText } from './permissions'
 import { cleanupJob, routerContext, routerPersona, routerPrompt, workerContext, workerPrompt } from './prompts'
 import {
-  baseConfigDir, buildLaunch, chooseProvider, cooling, DEFAULT_PROVIDER, kindOf, knownConfigDirs, loadProviders, markFailed, markOk,
+  baseConfigDir, buildLaunch, chooseProvider, configDirOf, cooling, DEFAULT_PROVIDER, kindOf, knownConfigDirs, loadProviders, markFailed, markOk,
   providerChain, providerFault, redact, resetTime, startupProblem, syncTranscript, unusableReason,
   type Choice, type FaultKind, type Health, type ProviderDef,
 } from './providers'
-import { claudeArgs, tmuxName, wrapArgv, writeProviderEnv, writeSessionFiles } from './spawn'
+import { claudeArgs, tmuxName, transcriptPath, wrapArgv, writeProviderEnv, writeSessionFiles } from './spawn'
 import { shepherd, waitForCalm } from './shepherd'
 import { buildSnapshot, StatusWriter } from './status'
 import { isDraft, Store, type MessageRow, type SessionRow, type TaskRow, type ThreadRow, type WorkerRow } from './store'
@@ -86,6 +87,10 @@ type Live = {
   unposted?: boolean
   /** The turn running is a cleanup job: no typing, no unposted check, its permission prompts allowed, and the session closes after it. */
   cleaning?: boolean
+  /** The config dir the current process runs with (where its transcript is). */
+  configDir?: string
+  /** Work the current process left running in the background (backgroundOf). */
+  background?: BackgroundTasks
 }
 
 /** Ticks (every 5 s) further apart than this, or hub timers quiet this long: re-arm everything. */
@@ -221,7 +226,7 @@ export class Hub {
       const hours = this.cleanupHoursFor(s.workspace)
       if (hours <= 0 || s.pinned || s.status === 'failed' || s.status === 'busy' || now - s.lastActiveAt < hours * 3_600_000) continue
       if (Number(this.store.get(`cleaned:${s.key}`) ?? 0) >= s.lastActiveAt) continue
-      if (this.queued(s.key) > 0 || this.inFlight(s.key) > 0) continue
+      if (this.queued(s.key) > 0 || this.inFlight(s.key) > 0 || this.backgroundOf(s.key).length > 0) continue
       // A closed worker waits for a free slot rather than closing another for its cleanup.
       if (!isLive(s.status) && this.liveCount('worker') >= this.cap('worker')) continue
       const w = this.store.worker(s.key)
@@ -245,6 +250,26 @@ export class Hub {
     return key.startsWith('w-') ? this.store.tasksFor(key, ['delivered']).length + messages : messages
   }
 
+  /**
+   * Work the session left running in the background (a Bash command, an async
+   * agent, a Monitor watch), read from its transcript (background.ts). Its turn
+   * ended, but it is still at work: typing… stays up, and it isn't closed for
+   * being idle, cleaned up, evicted or gracefully restarted meanwhile.
+   */
+  backgroundOf(key: string): BackgroundTask[] {
+    const row = this.store.session(key)
+    if (!row || !isLive(row.status) || !row.sessionId) return []
+    const l = this.liveOf(key)
+    // A session adopted after a hub restart: when its process started, and the config dir its provider runs with.
+    l.background ??= new BackgroundTasks(l.spawnedAt || Number(this.store.get(`spawned:${key}`) ?? 0))
+    if (!l.configDir) {
+      const name = this.providerOf(key)
+      l.configDir = configDirOf(this.p.dir, name, name === DEFAULT_PROVIDER ? undefined : this.providerDefs()[name]) ?? baseConfigDir()
+    }
+    l.background.refresh(transcriptPath(row.cwd, row.sessionId, l.configDir))
+    return l.background.running()
+  }
+
   /** Work waiting for the session (queued, or interrupted and to be re-delivered). */
   queued(key: string): number {
     const messages = this.store.pendingMessages(key).length
@@ -266,6 +291,15 @@ export class Hub {
     return this.store.get(`restart:${key}`) === '1'
   }
 
+  /**
+   * New work waits for a pending restart (the restarted session has the new
+   * settings). Not while work the session runs in the background holds the
+   * restart off: that may take long, and new work doesn't delay it more.
+   */
+  restartWaits(key: string): boolean {
+    return this.restartPending(key) && this.backgroundOf(key).length === 0
+  }
+
   private setRestartPending(key: string, on: boolean): void {
     if (on === this.restartPending(key)) return
     if (on) this.store.set(`restart:${key}`, '1')
@@ -277,6 +311,7 @@ export class Hub {
     return {
       key: s.key, role: s.role, workspace: s.workspace, status: s.status, pinned: s.pinned, lastActiveAt: s.lastActiveAt,
       attached: this.liveOf(s.key).attached, pendingPermissions: this.desk.count(s.key), inFlight: this.inFlight(s.key),
+      background: this.backgroundOf(s.key).length,
     }
   }
 
@@ -632,6 +667,7 @@ export class Hub {
     // A provider's env (secrets included) goes through a 0600 file the launch sources and deletes — never argv.
     if (launch.kind !== DEFAULT_PROVIDER) argv = wrapArgv(argv, writeProviderEnv(files, launch.env))
     l.provider = choice.name
+    l.configDir = launch.configDir ?? baseConfigDir()
     this.store.set(`provider:${key}`, choice.name)
     l.spawnId = shortId(6)
     const env: Record<string, string> = {
@@ -648,6 +684,8 @@ export class Hub {
     l.ready = false
     l.helloAt = 0
     l.spawnedAt = Date.now()
+    l.background = new BackgroundTasks(l.spawnedAt)
+    this.store.set(`spawned:${key}`, String(l.spawnedAt))
     l.startFlag = plan.mode === 'resume' ? 'resumed' : plan.lostContext ? 'fresh' : 'spawned'
     this.patch(key, { status: plan.mode === 'resume' ? 'resuming' : 'starting', closedAt: undefined, closeReason: undefined, lastActiveAt: Date.now() })
     try {
@@ -774,7 +812,7 @@ export class Hub {
   deliverPending(key: string): void {
     const l = this.liveOf(key)
     // A pending restart: new work waits for the restarted session, which has the new settings.
-    if (!l.ready || !l.conn || this.held(key) || this.restartPending(key)) return
+    if (!l.ready || !l.conn || this.held(key) || this.restartWaits(key)) return
     if (key.startsWith('w-')) {
       if (this.inFlight(key) > 0) return
       // A task first; a cleanup job only when nothing else waits (a task makes the worker active again).
@@ -809,7 +847,7 @@ export class Hub {
   /** Deliver the worker's next pending task, if it is ready and free. */
   deliverNextTask(key: string): TaskRow | undefined {
     const l = this.liveOf(key)
-    if (!l.ready || !l.conn || this.held(key) || this.restartPending(key)) return undefined
+    if (!l.ready || !l.conn || this.held(key) || this.restartWaits(key)) return undefined
     const next = this.store.pendingTasks(key)[0]
     if (!next) return undefined
     this.sendTask(key, next)
@@ -908,7 +946,11 @@ export class Hub {
       return { ok: true, message: `restarted ${label} (it was idle)`, state: 'restarted' }
     }
     this.setRestartPending(key, true)
-    log('lifecycle', `${key}: restart pending until its turn ends`)
+    const background = this.backgroundOf(key).length
+    log('lifecycle', `${key}: restart pending until its turn ends${background ? ` and its background work (${background}) is done` : ''}`)
+    if (background && row.status === 'idle') {
+      return { ok: true, message: `${label} will restart once the work it runs in the background is done (${background} task${background > 1 ? 's' : ''}); restarting it now would stop that work`, state: 'pending' }
+    }
     const why = this.desk.count(key) ? ' (a 🔐 prompt is open)' : ''
     return { ok: true, message: `${label} will restart as soon as its current turn ends${why}`, state: 'pending' }
   }
@@ -1140,7 +1182,8 @@ export class Hub {
         return
       }
     }
-    if (this.restartPending(key)) {
+    // Work left running in the background would die with the process: the restart waits for it (reap checks again).
+    if (this.restartPending(key) && this.backgroundOf(key).length === 0) {
       await this.restartNow(key, 'pending restart, its turn ended')
       return
     }
@@ -1564,9 +1607,11 @@ export class Hub {
   /**
    * Keep "typing…" up in every thread a session is working for: a busy router in its
    * thread, a busy worker in the thread of its task. Mattermost drops the indicator
-   * after a few seconds, so this runs every 3 s. Only while a session runs a turn:
-   * not while it starts or resumes, nor while Laya or OpenRouter judges a reply (no
-   * session runs then), nor while it waits on a 🔐 prompt or an API-error retry.
+   * after a few seconds, so this runs every 3 s. While a session runs a turn, and
+   * while work it left running in the background goes on (its turn ended, but the
+   * work didn't): not while it starts or resumes, nor while Laya or OpenRouter
+   * judges a reply (no session runs then), nor while it waits on a 🔐 prompt or an
+   * API-error retry.
    */
   keepTyping(): void {
     if (!this.mm.connected) return
@@ -1574,13 +1619,35 @@ export class Hub {
     for (const s of this.store.sessions()) {
       const l = this.live.get(s.key)
       if (!l || this.desk.count(s.key) > 0 || this.held(s.key)) continue
-      if (s.status !== 'busy' || !l.ready || !l.conn || l.cleaning) continue
+      if (!l.ready || !l.conn || l.cleaning) continue
+      if (s.status === 'idle') {
+        const background = this.backgroundOf(s.key).length
+        // Claude Code started a turn by itself, with a finished task's notice.
+        if ((l.background?.promptedAt ?? 0) > s.lastActiveAt) void this.enqueue(() => this.taskTurn(s.key))
+        if (!background) continue
+      } else if (s.status !== 'busy') continue
       const t = this.activeThreadOf(s.key)
       // A draft thread (a scheduled run's) has no post yet to show it under.
       if (!t || done.has(t.id) || isDraft(t.id)) continue
       done.add(t.id)
       this.mm.typing(t.channelId, t.id)
     }
+  }
+
+  /**
+   * A task the session ran in the background ended while it was idle, and Claude
+   * Code started a turn with its notice (no message from the hub began it): the
+   * session is busy until that turn's Stop. A screen check soon after catches a
+   * turn that ended before the hub noticed it began. Call on the chain.
+   */
+  private taskTurn(key: string): void {
+    const row = this.store.session(key)
+    const l = this.live.get(key)
+    if (!row || row.status !== 'idle' || !l?.background || l.background.promptedAt <= row.lastActiveAt) return
+    log('lifecycle', `${key}: a task it ran in the background ended — its turn for it runs`)
+    this.patch(key, { status: 'busy', busySince: Date.now(), lastActiveAt: Date.now() })
+    if (l.recheck) clearTimeout(l.recheck)
+    l.recheck = setTimeout(() => void this.enqueue(() => this.recheckBusy(key)), 20_000)
   }
 
   /** The access skill drops <approved>/<userId> files; tell those people they're in. */
@@ -1639,6 +1706,7 @@ export class Hub {
       queuedTasks: key => this.queued(key),
       inFlight: key => this.inFlight(key),
       restartPending: key => this.restartPending(key),
+      background: key => this.backgroundOf(key).length,
       retryAt: key => this.retryAt(key),
       idleMinutes: s => this.idleMinutesFor(s),
       tmuxName,
@@ -1664,6 +1732,11 @@ export class Hub {
         if (s.status === 'starting' || s.status === 'resuming' || s.status === 'closing') this.store.patchSession(s.key, { status: 'idle' })
         if (s.status === 'busy') busy.push(s.key)
         this.liveOf(s.key).goneSince = Date.now()
+        // Launched before the hub kept this: background work from before this process started died with the earlier one.
+        if (!this.store.get(`spawned:${s.key}`)) {
+          const at = await this.tmux.createdAt?.(tmuxName(s.key)).catch(() => undefined)
+          if (at) this.store.set(`spawned:${s.key}`, String(at))
+        }
         log('hub', `adopting live session ${s.key}`)
       } else if (this.markStopped(s.key, 'exited')) {
         interrupted.push(s.key)

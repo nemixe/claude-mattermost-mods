@@ -19,6 +19,8 @@ export type ReapView = {
   pendingPermissions: number
   /** Worker tasks delivered and not ended. */
   inFlight: number
+  /** Work it left running in the background (its turn ended, the work goes on). */
+  background?: number
 }
 
 export const LIVE_STATUSES: SessionStatus[] = ['starting', 'resuming', 'busy', 'idle', 'closing']
@@ -34,6 +36,7 @@ export function holdReason(s: ReapView): string | undefined {
   if (s.attached > 0) return 'attached'
   if (s.pendingPermissions > 0) return 'waiting on a permission prompt'
   if (s.inFlight > 0) return 'task in flight'
+  if ((s.background ?? 0) > 0) return 'background work running'
   return undefined
 }
 
@@ -78,8 +81,8 @@ export function planStart(o: { sessionId: string; turns: number; transcriptExist
  * work in flight and no 🔐 prompt open. (Pinned or attached sessions may
  * restart; only work in progress makes it wait.)
  */
-export function canRestartNow(s: Pick<ReapView, 'status' | 'inFlight' | 'pendingPermissions'>): boolean {
-  return s.status === 'idle' && s.inFlight === 0 && s.pendingPermissions === 0
+export function canRestartNow(s: Pick<ReapView, 'status' | 'inFlight' | 'pendingPermissions' | 'background'>): boolean {
+  return s.status === 'idle' && s.inFlight === 0 && s.pendingPermissions === 0 && !s.background
 }
 
 /**
