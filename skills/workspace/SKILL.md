@@ -110,8 +110,8 @@ Arguments passed: `$ARGUMENTS`
   and decides only when Laya is sure it fits, so vague rules do nothing. Without an
   argument, show the current setting.
 - **`accept <workspace> [all|none|<ws>…]`**: which workspaces' sessions may ask this
-  one (their `message_workspace` opens a 📨 request thread in its channel, answered by
-  its router). `all` removes `acceptFrom` (the default: every workspace); `none` sets
+  one (their `message_workspace` goes to a new router of this one, which answers in a
+  thread of its channel that it opens in its own words). `all` removes `acceptFrom` (the default: every workspace); `none` sets
   `[]`; names set the list. Without an argument, show it (`mmhub ws show`). Requests
   need a bound channel in the target workspace. On a `personal-<id>` workspace it
   limits which workspaces may ask that person privately (`send_dm`).

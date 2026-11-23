@@ -500,13 +500,17 @@ export class Store {
     else this.db.query('UPDATE inbox SET state = ? WHERE id = ?').run(state, id)
   }
 
-  /** The person who last wrote to the session: the newest of its messages with a sender (meta user_id). */
+  /**
+   * The person who last wrote to the session in its thread: the newest of its messages
+   * with a sender (meta user_id) that is a post there, not an answer from elsewhere
+   * (a dm_reply names the person who was asked, not the one the session serves).
+   */
   latestSender(sessionKey: string): string | undefined {
     const rows = this.db.query('SELECT meta FROM inbox WHERE session_key = ? ORDER BY id DESC LIMIT 50').all(sessionKey) as { meta: string }[]
     for (const r of rows) {
       try {
         const m = JSON.parse(r.meta) as Record<string, unknown>
-        if (typeof m.user_id === 'string' && m.user_id) return m.user_id
+        if (typeof m.user_id === 'string' && m.user_id && m.kind === undefined) return m.user_id
       } catch {}
     }
     return undefined

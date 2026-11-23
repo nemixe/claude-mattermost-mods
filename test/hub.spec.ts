@@ -18,6 +18,7 @@ import { delegate, handleCall, ToolError } from '../src/hub/tools'
 import { control } from '../src/hub/control'
 import { addJob, runDueJobs } from '../src/hub/jobs'
 import { otherAgentCheck } from '../src/hub/agents'
+import { workspaceTitle } from '../src/hub/links'
 import { RETRY_DELAYS } from '../src/hub/lifecycle'
 import type { Mattermost, MMPost } from '../src/hub/mattermost'
 import { tmuxName, transcriptPath } from '../src/hub/spawn'
@@ -707,27 +708,28 @@ describe('cross-workspace requests and DMs', () => {
     return { ...env, bee, key, wb }
   }
 
-  test("a worker asks another workspace; that workspace's router answers in a visible thread and the answer comes back", async () => {
+  test("a worker asks another workspace: the hub posts nothing, that workspace's router opens a thread in its own words, and its answers come back", async () => {
     const { hub, tmux, posts, others, bee, key, wb } = await scene()
     const res = await handleCall(hub, key, 'message_workspace', { workspace: 'bee', text: 'What is the staging DB host?' })
-    expect(res).toContain('request_id p1')
-    expect(posts[0]).toMatchObject({ id: 'p1', channel_id: 'CB' })
-    expect(posts[0]!.root_id).toBeUndefined()
-    expect(posts[0]!.message).toContain('📨 **Request from workspace demo**')
-    expect(posts[0]!.message).toContain('What is the staging DB host?')
-    expect(hub.store.link('p1')).toMatchObject({ kind: 'workspace', fromKey: key, fromThread: 'T1', peer: 'bee', chain: ['demo'] })
+    const draft = /request_id (draft-\w+)/.exec(res)![1]!
+    expect(res).toContain("sent to workspace bee's router")
+    expect(posts).toEqual([]) // no 📨 post of the hub's: the other router writes what its channel reads
+    expect(hub.store.link(draft)).toMatchObject({ kind: 'workspace', fromKey: key, fromThread: 'T1', peer: 'bee', chain: ['demo'], channelId: 'CB' })
 
-    // bee gets a router for the request thread, told who is asking.
-    const t = hub.store.thread('p1')!
-    expect(t).toMatchObject({ channelId: 'CB', workspace: 'bee' })
+    // bee gets a router for the request, told who is asking (never the asking thread's label) and that it opens the thread.
+    const t = hub.store.thread(draft)!
+    expect(t).toMatchObject({ channelId: 'CB', workspace: 'bee', label: 'request from workspace demo' })
     const rb = await connect(hub, tmux, t.routerKey, 2)
-    expect(rb.got[0]!.meta).toMatchObject({ kind: 'workspace_request', from_workspace: 'demo', thread_id: 'p1', chat_id: 'CB', workspace: 'bee' })
-    expect(rb.got[0]!.content).toContain('Not a person')
+    expect(rb.got[0]!.meta).toMatchObject({ kind: 'workspace_request', from_workspace: 'demo', from_session: 'its worker "Fixer"', thread_id: draft, chat_id: 'CB', workspace: 'bee' })
+    expect(rb.got[0]!.content).toContain('[Request from workspace demo — its worker "Fixer". Not a person')
+    expect(rb.got[0]!.content).toContain('Your first reply opens this thread as a new post in ~CB')
     expect(rb.got[0]!.content).toContain('What is the staging DB host?')
 
-    // Its answer is posted in the thread, and reaches the worker as work for T1.
-    await handleCall(hub, t.routerKey, 'reply', { chat_id: 'CB', text: 'staging-db.internal:5432' })
-    expect(posts.at(-1)).toMatchObject({ root_id: 'p1', message: 'staging-db.internal:5432' })
+    // Its first reply opens the thread in its channel, in its words, and reaches the worker as work for T1.
+    await handleCall(hub, t.routerKey, 'reply', { chat_id: 'CB', text: 'Workspace demo asked for the staging DB host: staging-db.internal:5432' })
+    expect(posts[0]).toMatchObject({ id: 'p1', channel_id: 'CB', message: 'Workspace demo asked for the staging DB host: staging-db.internal:5432' })
+    expect(posts[0]!.root_id).toBeUndefined()
+    expect(hub.store.link('p1')).toMatchObject({ kind: 'workspace', fromKey: key })
     await until('the answer reaches the worker', () => wb.got.length === 2)
     expect(wb.got[1]!.content).toContain('[Answer from workspace "bee" (its router) to your request p1')
     expect(wb.got[1]!.content).toContain('staging-db.internal:5432')
@@ -738,12 +740,13 @@ describe('cross-workspace requests and DMs', () => {
     others.push({ id: 'T1', root_id: '', user_id: 'U1', channel_id: 'C1', message: 'demo work', create_at: 0 } as MMPost)
     await expect(handleCall(hub, t.routerKey, 'fetch_thread', { thread_id: 'T1' })).rejects.toThrow('no person to read for')
 
-    // A follow-up goes to the same router, in the same thread.
+    // A follow-up, by the id the asker was given, goes to the same router as a message: nothing is posted.
     const n = rb.got.length
-    await handleCall(hub, key, 'message_workspace', { request_id: 'p1', text: 'And the read replica?' })
-    expect(posts.at(-1)).toMatchObject({ root_id: 'p1', channel_id: 'CB' })
+    await handleCall(hub, key, 'message_workspace', { request_id: draft, text: 'And the read replica?' })
+    expect(posts.length).toBe(1)
     await until('the follow-up reaches the router', () => rb.got.length === n + 1)
-    expect(rb.got[n]!.content).toContain('[Follow-up from workspace "demo"')
+    expect(rb.got[n]!.content).toContain('[Follow-up from workspace demo (its worker "Fixer") on its request')
+    expect(rb.got[n]!.content).toContain('And the read replica?')
     expect(hub.store.link('p1')!.messages).toBe(3)
 
     // Refused: its own workspace, an unknown one, a loop back, a workspace that doesn't take requests.
@@ -773,6 +776,8 @@ describe('cross-workspace requests and DMs', () => {
       writeFileSync(join(dir, 'access.json'), JSON.stringify({ dmPolicy: 'allowlist', allowFrom: ['U1'], channels: {}, pending: {} }))
     })
     const { rkey, rb } = await askingRouter(hub, tmux, w, 2)
+    // bob (U2) wrote in the asking thread: it asks for him.
+    hub.store.insertMessage({ sessionKey: rkey, content: 'Can we deploy today?', meta: { user_id: 'U2', user: 'bob' }, state: 'ended', createdAt: Date.now() })
 
     // Routers only: a worker reports the question to its router instead.
     await expect(handleCall(hub, key, 'send_dm', { user: 'alice', text: 'May I deploy?' })).rejects.toThrow('only routers ask people privately')
@@ -789,7 +794,7 @@ describe('cross-workspace requests and DMs', () => {
     // Her agent gets the question, asks her in the DM (its first reply opens the thread) ...
     const ab = await connect(hub, tmux, t.routerKey, 3)
     expect(ab.got[0]!.meta).toMatchObject({ kind: 'dm_request', from_workspace: 'demo' })
-    expect(ab.got[0]!.content).toContain('[Private question from workspace "demo"')
+    expect(ab.got[0]!.content).toContain('[Private question from workspace demo — the router of one of its threads, for @alice. Not a person')
     expect(ab.got[0]!.content).toContain('May I deploy to staging today?')
     await handleCall(hub, t.routerKey, 'reply', { text: 'Hi Alice, the deploy-plan thread in demo asks: may it deploy to staging today?' })
     const root = posts[0]!.id
@@ -825,10 +830,11 @@ describe('cross-workspace requests and DMs', () => {
     expect(rb.got[1]!.content).toContain(said)
     expect(rb.got[1]!.content).toContain("(It quotes @alice's own words, as they asked: she asked me to send her wording as it is)")
 
-    // The asker asks more, by the id it was given: her agent gets it.
+    // The asker asks more, by the id it was given: her agent gets it. Her answer to the asker doesn't make her the one it serves.
     await handleCall(hub, rkey, 'send_dm', { thread_id: draft, text: 'Which branch?' })
+    expect(hub.store.latestSender(rkey)).toBe('U2')
     await until('the follow-up reaches her agent', () => ab.got.length === 3)
-    expect(ab.got[2]!.content).toContain('[Follow-up from workspace "demo"')
+    expect(ab.got[2]!.content).toContain('[Follow-up from workspace demo (the router of one of its threads, for @alice) on its private question')
     // answer_request only answers a private question.
     await expect(handleCall(hub, rkey, 'answer_request', { text: 'x' })).rejects.toThrow('no private question')
   }, T)
@@ -995,6 +1001,8 @@ describe('personal workspaces', () => {
     await dm(hub, 'U1', 'D1', 'DM1', 'can you check the build?')
     expect(posts).toEqual([]) // no "which workspace?"
     expect(hub.store.thread('DM1')).toMatchObject({ channelId: 'D1', workspace: 'personal-U1' })
+    expect(workspaceTitle(hub, 'personal-U1')).toBe("@alice's personal workspace")
+    expect(workspaceTitle(hub, 'demo')).toBe('workspace demo')
     expect(loadBindings(p.bindings)['D1']).toBe('personal-U1')
     expect(loadWorkspace(hub.cfg, 'personal-U1')).toMatchObject({ description: 'Personal workspace of @alice', repos: [] })
     expect(hub.queued(hub.store.thread('DM1')!.routerKey)).toBe(1) // the message waits for its router

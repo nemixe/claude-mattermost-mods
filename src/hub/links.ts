@@ -1,10 +1,12 @@
 /**
  * Sessions reaching beyond their own thread:
  *
- * - **Another workspace.** `message_workspace` opens a thread in one of that
- *   workspace's channels ("📨 Request from workspace A"), with a router of its
- *   own, which answers like it would a person. What that workspace's sessions
- *   post there goes back to the asker.
+ * - **Another workspace.** `message_workspace` hands the request to a new router of
+ *   that workspace, on a thread of one of its channels that isn't posted yet (a
+ *   draft). The hub posts nothing: that router opens the thread with its first post,
+ *   in its own words, written for the people of its channel. What that workspace's
+ *   sessions post there goes back to the asker; the asker's follow-ups reach the
+ *   router as messages, not posts.
  * - **A private question to a person** (routers only). `send_dm` hands it to that
  *   person's own agent: a new router of their personal workspace (personal-<user id>,
  *   created on first use), in a new thread of their DM with the bot. It asks them in
@@ -79,12 +81,25 @@ function homeThread(hub: Hub, key: string, threadId?: string): ThreadRow {
 }
 
 /** How the asker is shown: "🛠 **Fixer** (worker `w-…`)" / "🧭 the router of thread “…”". */
-function who(hub: Hub, key: string): string {
-  return key.startsWith('w-') ? `🛠 **${hub.label(key)}** (worker \`${key}\`)` : `🧭 the router of thread “${hub.label(key)}”`
+/**
+ * A workspace as people read it: `personal-<user id>` is "@ami's personal workspace"
+ * (from the description the hub gave it), any other by its name.
+ */
+export function workspaceTitle(hub: Hub, name: string): string {
+  const owner = name.startsWith('personal-') ? /@([\w.-]+)/.exec(hub.ws(name)?.description ?? '')?.[1] : undefined
+  return owner ? `@${owner}'s personal workspace` : `workspace ${name}`
 }
 
-function plainWho(hub: Hub, key: string): string {
-  return key.startsWith('w-') ? `worker "${hub.label(key)}" (${key})` : `the router of thread "${hub.label(key)}" (${key})`
+/**
+ * Who asks, for the other side: a worker by its title; a router as the router of a
+ * thread, for the person it serves. Never the thread's label: that is the first
+ * message of the thread, which may be a DM.
+ */
+async function asker(hub: Hub, key: string, home?: ThreadRow): Promise<string> {
+  if (key.startsWith('w-')) return `its worker "${hub.label(key)}"`
+  const person = home ? hub.store.latestSender(home.routerKey) : undefined
+  const name = person ? safeName(await hub.mm.username(person).catch(() => '')) : undefined
+  return `the router of one of its threads${name ? `, for @${name}` : ''}`
 }
 
 function checkText(text: string): string {
@@ -149,20 +164,18 @@ export async function messageWorkspace(hub: Hub, key: string, a: { workspace?: s
   const mine = workspaceOf(hub, key)
 
   if (a.requestId) {
-    const l = hub.store.link(a.requestId)
+    const l = hub.store.link(hub.store.threadId(a.requestId))
     if (!l || l.kind !== 'workspace' || l.fromKey !== key) throw new ToolError(`request ${a.requestId} isn't one of yours — list_workspaces shows them`)
     if (a.workspace && a.workspace !== l.peer) throw new ToolError(`request ${a.requestId} is with workspace ${l.peer}, not ${a.workspace}`)
     checkOpen(l)
+    const from = await asker(hub, key, hub.store.thread(l.fromThread ?? ''))
     return hub.enqueue(async () => {
       const t = hub.store.thread(l.threadId)
       if (!t) throw new ToolError('that request thread is gone')
-      const post = await hub.mm.createPost({ channel_id: l.channelId, root_id: l.threadId, message: `📨 ${who(hub, key)}\n\n${text}`, props: { mmhub_request: key } })
       hub.store.bumpLink(l.threadId)
-      await hub.deliver(t.routerKey, `[Follow-up from workspace "${mine}" (${plainWho(hub, key)}) on its request — not a person; your replies in this thread go back to it]\n\n${text}`, {
-        ...requestMeta(t, mine, hub.label(key)),
-        message_id: post.id,
-      })
-      return `sent to workspace ${l.peer} (request ${l.threadId}). Answers come back to you as new messages.`
+      // To its router, not into the thread: what people there read is the router's to write.
+      await hub.deliver(t.routerKey, `[Follow-up from ${workspaceTitle(hub, mine)} (${from}) on its request — not a person, and nothing of it is posted: post in this thread what its people should know, in your own words. Your posts here go back to it.]\n\n${text}`, requestMeta(t, mine, from))
+      return `sent to workspace ${l.peer}'s router (request ${l.threadId}). Answers come back to you as new messages.`
     })
   }
 
@@ -179,33 +192,41 @@ export async function messageWorkspace(hub: Hub, key: string, a: { workspace?: s
   const channelId = await requestChannel(hub, target)
   if (!channelId) throw new ToolError(`workspace ${target.name} has no channel bound, so it can't take requests (an owner binds one with /mattermost-hub:workspace bind)`)
 
+  const from = await asker(hub, key, home)
+  const title = workspaceTitle(hub, mine)
+
   return hub.enqueue(async () => {
-    const root = await hub.mm.createPost({ channel_id: channelId, message: `📨 **Request from workspace ${mine}** — ${who(hub, key)}\n\n${text}`, props: { mmhub_request: key } })
-    const now = Date.now()
-    hub.store.insertLink({ threadId: root.id, kind: 'workspace', channelId, fromKey: key, fromWorkspace: mine, fromThread: home.id, peer: target.name, chain: next.chain, createdAt: now })
-    hub.store.bumpLink(root.id)
+    // Nothing is posted: the request goes to a router of that workspace, on a thread its first post opens.
+    const draft = `${DRAFT}${shortId(12)}`
+    hub.store.insertLink({ threadId: draft, kind: 'workspace', channelId, fromKey: key, fromWorkspace: mine, fromThread: home.id, peer: target.name, chain: next.chain, createdAt: Date.now() })
+    hub.store.bumpLink(draft)
     // A request in a DM: the new router must know every message there reaches it (no Laya). The lookup is cached.
-    if ((await hub.mm.channel(channelId).catch(() => undefined))?.type === 'D') noteDM(hub, channelId)
-    const rkey = hub.createRouter({ threadId: root.id, channelId, workspace: target, label: `⇠ ${mine}: ${text.replace(/\s+/g, ' ').slice(0, 48)}` })
-    const t = hub.store.thread(root.id)!
-    log('links', `${key} (${mine}) asked workspace ${target.name}: request ${root.id}, router ${rkey}`)
+    const ch = await hub.mm.channel(channelId).catch(() => undefined)
+    if (ch?.type === 'D') noteDM(hub, channelId)
+    const rkey = hub.createRouter({ threadId: draft, channelId, workspace: target, label: `request from ${title}`.slice(0, 60) })
+    const t = hub.store.thread(draft)!
+    log('links', `${key} (${mine}) asked workspace ${target.name}: router ${rkey} on ${draft}`)
     await hub.deliver(rkey, [
-      `[Request from workspace "${mine}" — ${plainWho(hub, key)}. Not a person: a Claude session working for that workspace. Your replies in this thread go back to it; people in this channel can read them too. Handle it like a person's request: answer yourself when reading is enough, delegate work that changes things. Never share secrets (keys, tokens, passwords).]`,
+      `[Request from ${title} — ${from}. Not a person: a Claude session working for that workspace, and nothing of it is posted. Handle it like a person's request: answer yourself when reading is enough, delegate work that changes things. Your first reply opens this thread as a new post in ${ch ? channelName(ch) : 'your channel'}: write it for the people there, in your own words (what is asked, by whom, and your answer or next step), not a copy of this message. Everything you post in this thread goes back to the asker. Never share secrets (keys, tokens, passwords).]`,
       '',
       text,
-    ].join('\n'), { ...requestMeta(t, mine, hub.label(key)), message_id: root.id })
-    return `sent to workspace ${target.name} (request_id ${root.id}, ${hub.permalink(root.id)}). Its router answers there, and each answer comes back to you as a new message for thread ${home.id}. Follow up with message_workspace(request_id="${root.id}", text=…). If you need the answer to go on, end your turn and wait for it.`
+    ].join('\n'), requestMeta(t, mine, from))
+    return `sent to workspace ${target.name}'s router (request_id ${draft}). It answers in a thread of its own channel, which it opens with its first post, and each answer comes back to you as a new message for thread ${home.id}. Follow up with message_workspace(request_id="${draft}", text=…). If you need the answer to go on, end your turn and wait for it.`
   })
 }
 
-function requestMeta(t: ThreadRow, from: string, fromLabel: string): Record<string, string> {
+function channelName(ch: { type: string; name: string }): string {
+  return ch.type === 'D' ? 'a direct message' : ch.type === 'G' ? 'a group message' : `~${ch.name}`
+}
+
+function requestMeta(t: ThreadRow, from: string, fromSession: string): Record<string, string> {
   return {
     chat_id: t.channelId,
     thread_id: t.id,
     user: `workspace:${from}`,
     kind: 'workspace_request',
     from_workspace: from,
-    from_session: fromLabel.slice(0, 80),
+    from_session: fromSession.slice(0, 80),
     workspace: t.workspace,
     ts: new Date().toISOString(),
   }
@@ -243,11 +264,8 @@ export async function sendDM(hub: Hub, key: string, a: { user?: string; text: st
   }
   return hub.enqueue(async () => {
     const ch = await hub.mm.directChannel(hub.bot.id, owner.id)
-    const root = await hub.mm.createPost({
-      channel_id: ch.id,
-      message: `💬 ${who(hub, key)}, workspace **${mine}**\n\n${text}\n\n_Reply in this thread to answer._`,
-      props: { mmhub_dm: key },
-    })
+    // The router's own words, as they are: it says who asks and why (no header of the hub's).
+    const root = await hub.mm.createPost({ channel_id: ch.id, message: text, props: { mmhub_dm: key } })
     hub.store.insertLink({ threadId: root.id, kind: 'dm', channelId: ch.id, fromKey: key, fromWorkspace: mine, fromThread: home.id, peer: owner.id, chain: [mine], createdAt: Date.now() })
     hub.store.bumpLink(root.id)
     // Catch-up after a reconnect should look in this DM from here on.
@@ -263,6 +281,8 @@ export async function sendDM(hub: Hub, key: string, a: { user?: string; text: st
  */
 async function askPrivately(hub: Hub, key: string, mine: string, home: ThreadRow, person: { id: string; name: string }, target: Workspace, text: string): Promise<string> {
   if (!accepts(target, mine)) throw new ToolError(`@${person.name}'s personal workspace doesn't take requests from ${mine} (its acceptFrom setting)`)
+  const from = await asker(hub, key, home)
+  const title = workspaceTitle(hub, mine)
   return hub.enqueue(async () => {
     const ch = await hub.mm.directChannel(hub.bot.id, person.id)
     if (!loadBindings(hub.p.bindings)[ch.id]) bindChannel(hub.p.bindings, ch.id, target.name)
@@ -272,14 +292,14 @@ async function askPrivately(hub: Hub, key: string, mine: string, home: ThreadRow
     const draft = `${DRAFT}${shortId(12)}`
     hub.store.insertLink({ threadId: draft, kind: 'personal', channelId: ch.id, fromKey: key, fromWorkspace: mine, fromThread: home.id, peer: person.id, chain: [mine], createdAt: Date.now() })
     hub.store.bumpLink(draft)
-    const rkey = hub.createRouter({ threadId: draft, channelId: ch.id, workspace: target, label: `⇠ ${mine}: ${text.replace(/\s+/g, ' ').slice(0, 48)}` })
+    const rkey = hub.createRouter({ threadId: draft, channelId: ch.id, workspace: target, label: `private question from ${title}`.slice(0, 60) })
     const t = hub.store.thread(draft)!
     log('links', `${key} (${mine}) asks @${person.name} privately through ${target.name}: router ${rkey}`)
     await hub.deliver(rkey, [
-      `[Private question from workspace "${mine}" — ${plainWho(hub, key)}. Not a person: a Claude session, which can't see this DM. Ask @${person.name}, the person this DM is with, what it needs: in your own words and their language, saying who asks and why, and ask them to answer in this thread (your first reply opens it). When they have answered, send back what was asked with answer_request: only that reaches workspace "${mine}", so leave out anything they didn't mean to share. If they decline or don't know, send that back. Never share secrets (keys, tokens, passwords).]`,
+      `[Private question from ${title} — ${from}. Not a person: a Claude session, which can't see this DM. Ask @${person.name}, the person this DM is with, what it needs: in your own words and their language, saying who asks and why, and ask them to answer in this thread (your first reply opens it). When they have answered, send back what was asked with answer_request: only that reaches ${title}, so leave out anything they didn't mean to share. If they decline or don't know, send that back. Never share secrets (keys, tokens, passwords).]`,
       '',
       text,
-    ].join('\n'), privateMeta(t, mine, hub.label(key)))
+    ].join('\n'), privateMeta(t, mine, from))
     return `asked @${person.name}'s own agent (workspace ${target.name}) to ask them privately in a DM (thread_id ${draft}). Their answer comes back to you as a new message (kind="dm_reply"); ask more with send_dm(thread_id="${draft}", text=…). If you need the answer to go on, end your turn and wait for it.`
   })
 }
@@ -287,23 +307,24 @@ async function askPrivately(hub: Hub, key: string, mine: string, home: ThreadRow
 /** More from the asker on a private question: to the person's agent, which asks them if it must. */
 async function askAgain(hub: Hub, key: string, mine: string, l: LinkRow, text: string): Promise<string> {
   const person = safeName(await hub.mm.username(l.peer)) ?? l.peer
+  const from = await asker(hub, key, hub.store.thread(l.fromThread ?? ''))
   return hub.enqueue(async () => {
     const t = hub.store.thread(l.threadId)
     if (!t) throw new ToolError('that private question is gone')
     hub.store.bumpLink(l.threadId)
-    await hub.deliver(t.routerKey, `[Follow-up from workspace "${mine}" (${plainWho(hub, key)}) on its private question — not a person, and it can't see this DM. Ask @${person} with reply if it needs them, then send back what was asked with answer_request.]\n\n${text}`, privateMeta(t, mine, hub.label(key)))
+    await hub.deliver(t.routerKey, `[Follow-up from ${workspaceTitle(hub, mine)} (${from}) on its private question — not a person, and it can't see this DM. Ask @${person} with reply if it needs them, then send back what was asked with answer_request.]\n\n${text}`, privateMeta(t, mine, from))
     return `sent to @${person}'s own agent (thread ${l.threadId}). Its answer comes back to you as a new message.`
   })
 }
 
-function privateMeta(t: ThreadRow, from: string, fromLabel: string): Record<string, string> {
+function privateMeta(t: ThreadRow, from: string, fromSession: string): Record<string, string> {
   return {
     chat_id: t.channelId,
     thread_id: t.id,
     user: `workspace:${from}`,
     kind: 'dm_request',
     from_workspace: from,
-    from_session: fromLabel.slice(0, 80),
+    from_session: fromSession.slice(0, 80),
     workspace: t.workspace,
     ts: new Date().toISOString(),
   }

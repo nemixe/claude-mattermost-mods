@@ -340,12 +340,18 @@ that think.
 
 A router or worker can ask another workspace, through that workspace's router:
 
-- `message_workspace(workspace, text)` posts **📨 Request from workspace A** in a channel
-  bound to the other workspace (O/P channels first) and gives that thread a router of
-  its own. The router treats it like a person's request: it answers itself or delegates
-  to its workers. Whatever that workspace's sessions post in the thread goes back to the
-  asker: a router gets it as a message, a worker as work for the thread it was busy on.
-  Follow-ups use `request_id`. Everything stays visible in the channel.
+- `message_workspace(workspace, text)` hands the request to a new router of the other
+  workspace, agent to agent. The hub posts nothing in its channel: no template, and
+  none of the asker's text as it is. That router treats it like a person's request: it
+  answers itself or delegates to its workers. Its first reply opens a thread in a
+  channel bound to its workspace (O/P channels first), written in its own words for
+  the people there: what is asked, by whom, and the answer or next step. Whatever that
+  workspace's sessions post in the thread goes back to the asker: a router gets it as
+  a message, a worker as work for the thread it was busy on. Follow-ups use
+  `request_id` and reach that router as messages, not posts. Everything it answers
+  stays visible in its channel. The other side learns who asks as "workspace A" (a
+  personal one as "@ami's personal workspace") and "the router of one of its threads,
+  for @ami", never the asking thread's first message.
 - `send_dm(user, text)` asks a person **privately**, agent to agent. Only routers can: a
   worker reports the question to its thread's router. The hub hands the question to a
   new router in the person's own workspace (`personal-<user id>`, created and bound to
@@ -361,7 +367,8 @@ A router or worker can ask another workspace, through that workspace's router:
   own words. Follow-ups use the `thread_id` the asker was given. Only **owners**
   (`access.json` `allowFrom`) can be asked; with `"*"` in `allowFrom`, any person (never
   a bot). With `personalWorkspaces: false` in `config.json`, `send_dm` DMs the owner
-  directly from the bot, and their replies in that DM thread go back to the router.
+  directly from the bot, with the router's text as it is (no header), and their replies
+  in that DM thread go back to the router.
 - `list_workspaces` shows the other workspaces, which of them take requests, and the
   session's open requests, DMs and private questions.
 

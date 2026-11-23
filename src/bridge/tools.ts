@@ -75,7 +75,7 @@ const common = (role: Role): Tool[] => [
   },
   {
     name: 'message_workspace',
-    description: "Ask another workspace for information or work it owns (its code, data, decisions). The hub opens a thread in that workspace's channel, where its router answers like it would a person (and may hand work to its workers). Each answer comes back to you as a new message" + (role === 'worker' ? ' for the thread you are working for' : '') + '. Returns request_id; pass it (instead of workspace) to follow up. Self-contained text: what you need, why, and what "done" means. Not for your own workspace.',
+    description: "Ask another workspace for information or work it owns (its code, data, decisions). The hub hands it to a new router of that workspace, which answers like it would a person (and may hand work to its workers): in a thread of its own channel that it opens with its own first post. Nothing of your text is posted as it is. Each answer comes back to you as a new message" + (role === 'worker' ? ' for the thread you are working for' : '') + '. Returns request_id; pass it (instead of workspace) to follow up. Self-contained text: what you need, why, and what "done" means. Not for your own workspace.',
     inputSchema: obj({
       workspace: s('Workspace name (list_workspaces)'),
       text: s('The request or follow-up (Markdown, max 8000 chars)'),
@@ -119,7 +119,7 @@ export function toolsFor(role: Role, reports: Reports = 'router'): Tool[] {
       ...common(role),
       {
         name: 'send_dm',
-        description: "Ask a person privately (a hub owner, by username): for a decision or information you need from them away from your thread. Use sparingly — your thread is the normal place to ask. The hub hands your question to that person's own agent, which asks them in a DM and sends their answer back to you as a new message (kind=\"dm_reply\"); you never see the DM itself. Write what you need and why, self-contained. Pass thread_id (instead of user) to ask more on a question you sent.",
+        description: "Ask a person privately (a hub owner, by username): for a decision or information you need from them away from your thread. Use sparingly — your thread is the normal place to ask. The hub hands your question to that person's own agent, which asks them in a DM and sends their answer back to you as a new message (kind=\"dm_reply\"); you never see the DM itself. Write what you need and why, self-contained: it may be posted to them as it is, so say who asks. Pass thread_id (instead of user) to ask more on a question you sent.",
         inputSchema: obj({
           user: s('Their username, e.g. "alice"'),
           text: s('What you need from them, and why (Markdown, max 8000 chars)'),
