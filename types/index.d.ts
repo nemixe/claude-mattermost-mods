@@ -80,6 +80,8 @@ export type WorkspaceSnapshot = {
   name: string
   path: string
   description?: string
+  /** Whose personal workspace it is, as `@user` (its name is `personal-<user id>`). */
+  label?: string
   channels: { id: string; name: string; permalink?: string }[]
   repos: { name: string; path: string }[]
   sessions: SessionSnapshot[]

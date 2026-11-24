@@ -223,7 +223,7 @@ async function downloadAttachment(hub: Hub, key: string, messageId: string): Pro
 
 function listWorkers(hub: Hub, key: string): string {
   const thread = threadFor(hub, key, {})
-  const workers = hub.store.workers(thread.workspace)
+  const workers = hub.store.routerWorkers(thread.workspace)
   if (!workers.length) return 'No workers yet in this workspace. Create one with delegate({new_worker: {title, summary}, task}).'
   const now = Date.now()
   const lines = workers.map(w => {
@@ -254,10 +254,10 @@ export async function delegate(
   let key: string
   if (o.workerKey) {
     const existing = hub.store.worker(o.workerKey)
-    if (!existing || existing.workspace !== w.name) throw new ToolError(`no worker ${o.workerKey} in workspace ${w.name} — call list_workers`)
+    if (!existing || existing.workspace !== w.name || existing.direct) throw new ToolError(`no worker ${o.workerKey} in workspace ${w.name} — call list_workers`)
     key = existing.key
   } else if (o.newWorker) {
-    const n = hub.store.workers(w.name).length
+    const n = hub.store.routerWorkers(w.name).length
     if (n >= hub.cfg.maxWorkersPerWorkspace) {
       throw new ToolError(`workspace ${w.name} already has ${n} workers (max ${hub.cfg.maxWorkersPerWorkspace}). Reuse one (list_workers) or ask an owner to remove one with "!worker rm <id>".`)
     }

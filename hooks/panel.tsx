@@ -24,6 +24,8 @@ export const PANE_TITLE = 'Mattermost Hub'
 export const STALE_MS = 15_000
 /** Session keys the CLI accepts; anything else never reaches argv. */
 export const KEY_RE = /^(r|w)-[a-z0-9]+$/
+/** Workspace names the hub accepts (its WORKSPACE_NAME_RE); anything else never reaches argv. */
+export const WORKSPACE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 /** How many stopped sessions an expanded group lists before "+N more". */
 const STOPPED_SHOWN = 20
 
@@ -269,6 +271,26 @@ export async function sessionOp(
   const { bunBin, cliPath } = snapshot.hub
   const argv = [bunBin, cliPath, 'session', op, key, ...(op === 'restart' && now ? ['--now'] : []), '--json']
   const answer = await runCli($, argv, 90_000)
+  toastAnswer($, answer)
+  return answer.ok
+}
+
+/**
+ * `mmhub session new <workspace> --json`: a direct session, started in the
+ * workspace folder, to attach to and work with by hand. The name is checked
+ * before it is passed.
+ */
+export async function newSession(
+  $: EngineInterface,
+  snapshot: HubSnapshot,
+  workspace: string,
+): Promise<boolean> {
+  if (!WORKSPACE_RE.test(workspace)) {
+    $.ui.toast(`mm: refused a malformed workspace name (${workspace.slice(0, 40)})`)
+    return false
+  }
+  const { bunBin, cliPath } = snapshot.hub
+  const answer = await runCli($, [bunBin, cliPath, 'session', 'new', workspace, '--json'], 90_000)
   toastAnswer($, answer)
   return answer.ok
 }
@@ -544,8 +566,11 @@ export async function renderPane($: EngineInterface, e: RenderInput<'Pane'>) {
 
     return (
       <Box flexDirection="column" marginTop={1}>
-        <Text bold color="claude" wrap="truncate-end">
-          {`▌${w.name}`}
+        <Text wrap="truncate-end">
+          <Text bold color="claude">
+            {`▌${w.label ?? w.name}`}
+          </Text>
+          {w.label ? <Text dimColor>{` ${w.name}`}</Text> : null}
         </Text>
         <Text dimColor wrap="truncate-end">
           {`${channels || 'no channels'} · ${repos} ${repos === 1 ? 'repo' : 'repos'}`}
@@ -556,6 +581,17 @@ export async function renderPane($: EngineInterface, e: RenderInput<'Pane'>) {
             {provider.rest ? <Text dimColor>{` · ${provider.rest}`}</Text> : null}
           </Text>
         ) : null}
+        <Box flexDirection="row">
+          <Button
+            key={`new:${w.name}`}
+            label="New session"
+            dimColor
+            onPress={async () => {
+              await newSession($, snap, w.name)
+              await poll($)
+            }}
+          />
+        </Box>
         {live.length === 0 ? <Text dimColor>No live sessions.</Text> : null}
         {live.map(s => sessionRow(s, false, w.provider?.active))}
         {stopped.length > 0 ? (

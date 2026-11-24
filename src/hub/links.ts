@@ -35,7 +35,7 @@ import type { MMPost } from './mattermost'
 import { DRAFT, type LinkRow, type ThreadRow } from './store'
 import { queueTask, ToolError } from './tools'
 import { noteDM } from './trigger'
-import { bindChannel, listWorkspaces, loadBindings, type Workspace } from './workspaces'
+import { bindChannel, listWorkspaces, loadBindings, personalOwner, type Workspace } from './workspaces'
 
 /** New requests and DMs one session may open per hour. */
 export const MAX_NEW_LINKS_PER_HOUR = 10
@@ -86,7 +86,7 @@ function homeThread(hub: Hub, key: string, threadId?: string): ThreadRow {
  * (from the description the hub gave it), any other by its name.
  */
 export function workspaceTitle(hub: Hub, name: string): string {
-  const owner = name.startsWith('personal-') ? /@([\w.-]+)/.exec(hub.ws(name)?.description ?? '')?.[1] : undefined
+  const owner = personalOwner(hub.ws(name))
   return owner ? `@${owner}'s personal workspace` : `workspace ${name}`
 }
 

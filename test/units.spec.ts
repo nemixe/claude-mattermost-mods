@@ -211,6 +211,14 @@ describe('bridge tools per reporting mode', () => {
     expect(instructionsFor('router', 'router')).toContain('kind="worker_report"')
     expect(instructionsFor('worker', 'router')).toContain("goes to the thread's router")
   })
+  test('a direct session: told to answer in its terminal, with nothing to post with and no worktrees', () => {
+    for (const reports of ['router', 'thread'] as const) {
+      const d = names(toolsFor('worker', reports, true))
+      expect(d).toEqual(['download_attachment', 'fetch_thread', 'read_channel', 'search_messages', 'list_channels', 'list_workspaces', 'list_schedules', 'trigger_rules'])
+      expect(instructionsFor('worker', reports, true)).toContain('answer here')
+      expect(instructionsFor('worker', reports, true)).not.toContain('not this terminal')
+    }
+  })
   test('workers posting in the thread themselves', () => {
     const w = toolsFor('worker', 'thread')
     expect(w.find(t => t.name === 'reply')!.description).toContain('Your title is added as a header')

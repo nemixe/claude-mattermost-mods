@@ -112,7 +112,8 @@ async function added(hub: Hub, key: string, w: Workspace, r: RepoRef, who: strin
     await hub.enqueue(async () => {
       for (const s of hub.store.sessions()) {
         if (s.workspace !== w.name || !isLive(s.status)) continue
-        if (s.role !== 'router' && git) continue // a git repo: workers work in their own checkout, inside their folder
+        // A git repo: workers work in their own checkout, inside their folder (direct sessions in the original, as routers do).
+        if (s.role !== 'router' && git && !hub.store.worker(s.key)?.direct) continue
         const res = await hub.restart(s.key)
         if (s.key !== key && res.ok) others++
       }

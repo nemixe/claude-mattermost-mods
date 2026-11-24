@@ -51,6 +51,10 @@ Arguments passed: `$ARGUMENTS`
 ## Dispatch (empty → list)
 
 - **list**: `mmhub ws list`, plus `mmhub status` for live sessions.
+- **To work in a workspace yourself**: `mmhub session new <workspace>` (or **New session** on the
+  workspace in the `/mm` panel) opens a direct session in the workspace folder, which works on
+  the repos where they are; attach with the `tmux -L mmhub attach -t mmw-…` command it prints.
+  Routers don't hand it tasks.
 - **`create <name> [description]`**: `mmhub ws create <name> <description>` (copies the
   template), then offer to fill in `CLAUDE.md` (purpose, conventions, test commands) and add repos.
 - **`bind <workspace> <channel>`**: channel id, or `<team>/<channel-name>` resolved with

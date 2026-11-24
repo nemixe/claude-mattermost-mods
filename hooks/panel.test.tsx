@@ -255,6 +255,35 @@ for (const surface of ['terminal', 'desktop'] as const) {
       await ui.unmount()
     })
 
+    test('New session opens a direct session in the workspace', async ($, on) => {
+      const w = world(on, JSON.stringify(fixture()))
+      await start($)
+      const ui = await $.ui.mount({ ...PANE, surface })
+
+      expect((await ui.find({ key: 'new:acme' }))?.props.label).toBe('New session')
+      await ui.press({ key: 'new:acme' })
+      expect(w.runs).toEqual([[BUN, CLI, 'session', 'new', 'acme', '--json']])
+      expect(w.toasts.at(-1)).toBe('mm: new acme ok')
+      await ui.unmount()
+    })
+
+    test("a personal workspace is headed by its person's name, then its own", async ($, on) => {
+      const snap = fixture()
+      const ws = snap.workspaces[0]!
+      ws.name = 'personal-u1abc'
+      ws.label = '@alice'
+      const w = world(on, JSON.stringify(snap))
+      await start($)
+      const ui = await $.ui.mount({ ...PANE, surface })
+
+      expect((await ui.find({ type: 'Text', text: /^▌@alice$/ }))?.props.color).toBe('claude')
+      expect((await ui.find({ type: 'Text', text: /^ personal-u1abc$/ }))?.props.dimColor).toBe(true)
+      // The buttons still go by the workspace's name.
+      await ui.press({ key: 'new:personal-u1abc' })
+      expect(w.runs).toEqual([[BUN, CLI, 'session', 'new', 'personal-u1abc', '--json']])
+      await ui.unmount()
+    })
+
     test('Restart waits for the turn; a pending one offers Restart now', async ($, on) => {
       const snap = fixture()
       const router = snap.workspaces[0]!.sessions[0]!
@@ -388,6 +417,19 @@ test('a malformed session key never reaches the CLI', async ($, on) => {
   await ui.press({ key: 'stop:w-def;rm' })
   expect(w.runs).toEqual([])
   expect(w.toasts.at(-1)).toMatch(/refused a malformed session key/)
+  await ui.unmount()
+})
+
+test('a malformed workspace name never reaches the CLI', async ($, on) => {
+  const snap = fixture()
+  snap.workspaces[0]!.name = '--json'
+  const w = world(on, JSON.stringify(snap))
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+
+  await ui.press({ key: 'new:--json' })
+  expect(w.runs).toEqual([])
+  expect(w.toasts.at(-1)).toMatch(/refused a malformed workspace name/)
   await ui.unmount()
 })
 

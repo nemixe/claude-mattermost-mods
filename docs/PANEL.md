@@ -1,6 +1,6 @@
 # The Mattermost Hub panel
 
-The panel is a Claude Code mod (a function-hooks plugin) that ships inside the `mattermost-hub` plugin. It shows the hub, its workspaces and every router and worker session in a pane next to the chat. Row buttons stop, wake, pin or unpin a session, and copy its tmux attach command.
+The panel is a Claude Code mod (a function-hooks plugin) that ships inside the `mattermost-hub` plugin. It shows the hub, its workspaces and every router and worker session in a pane next to the chat. Row buttons stop, wake, restart, pin or unpin a session, and copy its tmux attach command. A workspace's **New session** button opens a direct session in its folder.
 
 | File | What it is |
 | --- | --- |
@@ -58,12 +58,12 @@ tsc -p hooks
 - **Poll.** Every 2 s from `session.start` (`$.clock.every`), the mod reads `status.json` with `$.fs.read`. It writes the `view` atom only when its JSON changed. That happens at least on every 5 s heartbeat and whenever the hub goes up or down. The atom has a shape tag (`view-1`), so a reload with a different `HubView` ignores the stored value.
 - **Pane** (sized to `e.props.bodyColumns`):
   - Header: `● hub running vX · up 3h`, or `○ hub down` with the reason and a **Start hub** button. Then Mattermost `● connected as @bot` or `○ disconnected`, then `routers n/max · workers n/max`.
-  - Per workspace: `▌name`, then `#channel #channel · N repos`. Then the provider line, unless the workspace runs on the hub's own login alone: `provider backup · fallback · acme sign-in, back in 42m · bk: <why it is unusable>`. The first part is dim on the first provider of the chain, `warning` on a fallback, and `error` when no provider is usable (`· no usable provider`) or all are resting (`· all resting`).
-  - Live sessions, routers first, then by most recent activity: `🧭`/`🛠️`, the label, the model, `🔐n`, `📌` and `👁️`. Below that the status (`busy`, `idle 12m · closes in 18m`, `starting`, `n queued`, and `on <provider>` while a session still runs on another provider than its workspace's active one), the summary, and the buttons Stop, Pin/Unpin, Copy attach, and a `Thread` link to the first permalink.
+  - Per workspace: `▌name` (a personal workspace: `▌@user personal-<user id>`), then `#channel #channel · N repos`. Then the provider line, unless the workspace runs on the hub's own login alone: `provider backup · fallback · acme sign-in, back in 42m · bk: <why it is unusable>`. The first part is dim on the first provider of the chain, `warning` on a fallback, and `error` when no provider is usable (`· no usable provider`) or all are resting (`· all resting`). Then a **New session** button, which opens a direct session: a worker that runs in the workspace folder itself, for you to attach to and work with by hand (README, "Direct sessions").
+  - Live sessions, routers first, then by most recent activity: `🧭`/`🛠️`, the label, the model, `🔐n`, `📌` and `👁️`. Below that the status (`busy`, `idle 12m · closes in 18m`, `starting`, `n queued`, and `on <provider>` while a session still runs on another provider than its workspace's active one), the summary, and the buttons Stop, Pin/Unpin, Restart (Restart now while one waits for the turn), Copy attach, and a `Thread` link to the first permalink.
   - Stopped and failed sessions go in a collapsible `▸ N stopped` group, one `StateFamily<boolean>` member per workspace name. Each row reads `stopped 2h ago (idle)` with Wake and Pin/Unpin buttons. An expanded group lists up to 20 rows, then `+N more`.
 - **Status line** (`$.ui.status`): `mm ● 1🧭 1🛠️ · 🔐1`, with ` · offline` added while Mattermost is disconnected. It is cleared (set to `undefined`) while the hub is down.
 
-Button keys are `stop:<key>`, `wake:<key>`, `pin:<key>`, `unpin:<key>`, `copy:<key>`, `stopped:<workspace>` and `start-hub`.
+Button keys are `new:<workspace>`, `stop:<key>`, `wake:<key>`, `restart:<key>`, `restart-now:<key>`, `pin:<key>`, `unpin:<key>`, `copy:<key>`, `stopped:<workspace>` and `start-hub`.
 
 ## The data contract
 
@@ -77,6 +77,7 @@ type HubSnapshot = { schema: 1
   mattermost: { connected: boolean; url: string; bot?: string }
   caps: { liveRouters: number; maxLiveRouters: number; liveWorkers: number; maxLiveWorkers: number }
   workspaces: { name: string; path: string; description?: string
+    label?: string /* "@user": whose personal workspace it is */
     channels: { id: string; name: string; permalink?: string }[]
     repos: { name: string; path: string }[]
     sessions: SessionSnapshot[]
@@ -97,7 +98,8 @@ type SessionSnapshot = { key: string /* ^(r|w)-[a-z0-9]+$ */; role: 'router'|'wo
 
 ### The CLI the buttons run
 
-- **Session ops.** The key must match `^(r|w)-[a-z0-9]+$`; anything else is refused with a toast and never reaches argv. The mod runs `$.process.run([hub.bunBin, hub.cliPath, 'session', op, key, '--json'])` with op `stop`, `wake`, `pin` or `unpin`, and a 30 s timeout.
+- **Session ops.** The key must match `^(r|w)-[a-z0-9]+$`; anything else is refused with a toast and never reaches argv. The mod runs `$.process.run([hub.bunBin, hub.cliPath, 'session', op, key, '--json'])` with op `stop`, `wake`, `restart` (plus `--now` for Restart now), `pin` or `unpin`, and a 90 s timeout.
+- **New session.** The workspace name must match `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$` (the hub's rule); anything else is refused with a toast and never reaches argv. The mod runs `[hub.bunBin, hub.cliPath, 'session', 'new', name, '--json']` with a 90 s timeout. The hub answers once the session's tmux session is up, `starting w-… (Direct session N) in <dir> — attach: tmux -L mmhub attach -t mmw-…`, and the new row appears at the next poll.
 - **Start hub.** The mod runs `[bunBin ?? 'bun', cliPath ?? '<plugin root>/bin/mmhub', 'start', '--json']`, taking the paths from the last snapshot read (a stale one included) when there is one. The timeout is 60 s. When a hub process still answers but its heartbeat is older than 15 s (the pane shows it down), `mmhub start` stops it and starts a new one, so the button recovers that state too.
 - **Output.** Both print one JSON line on stdout, `{"ok": boolean, "message": string}`, and exit 0 on success. The mod reads the last non-empty stdout line and shows `mm: <message>` (or `mm failed: <message>`) with `$.ui.toast`. If there is no JSON line, the toast falls back to stderr's last line, then to `exited <code>`. After each action the mod polls once more, so the pane catches up straight away.
 - **`mmhub start` has to detach.** `$.process.run` reads the child's output to EOF, so a daemon that inherits the CLI's stdout or stderr holds the button for the full 60 s and then fails. Start the daemon detached, with its stdio pointed at `hub.log` or `/dev/null`, print the JSON line and exit.

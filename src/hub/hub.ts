@@ -30,7 +30,7 @@ import { classifyLater, countSkipped, following, inDM, noteDM, setFollowing, tak
 import { canRestartNow, classifyFailure, dueForIdleClose, isLive, looksBusy, noticeForRetry, pickEvictee, planStart, RestartBudget, retryDelay, type ReapView } from './lifecycle'
 import type { Mattermost, MMPost, MMReaction } from './mattermost'
 import { answeredText, PermissionDesk, promptText, staleText } from './permissions'
-import { cleanupJob, routerContext, routerPersona, routerPrompt, workerContext, workerPrompt } from './prompts'
+import { cleanupJob, directContext, directPrompt, routerContext, routerPersona, routerPrompt, workerContext, workerPrompt } from './prompts'
 import {
   baseConfigDir, buildLaunch, chooseProvider, configDirOf, cooling, DEFAULT_PROVIDER, kindOf, knownConfigDirs, loadProviders, markFailed, markOk,
   providerChain, providerFault, readSecret, redact, resetTime, startupProblem, syncTranscript, unusableReason,
@@ -231,7 +231,7 @@ export class Hub {
       // A closed worker waits for a free slot rather than closing another for its cleanup.
       if (!isLive(s.status) && this.liveCount('worker') >= this.cap('worker')) continue
       const w = this.store.worker(s.key)
-      if (!w) continue
+      if (!w || w.direct) continue // a direct session works in the original checkouts: nothing of its own to clear
       this.store.set(`cleaned:${s.key}`, String(now))
       const worktrees = Object.entries(w.repos).map(([name, t]) => ({ name, ...t }))
       log('lifecycle', `${s.key}: no work for ${fmtAge(now - s.lastActiveAt)} — cleanup job`)
@@ -575,17 +575,21 @@ export class Hub {
     return key
   }
 
-  createWorker(o: { workspace: Workspace; title: string; summary: string }): string {
+  /** `direct`: a direct session (store.ts WorkerRow.direct), in the workspace folder itself. */
+  createWorker(o: { workspace: Workspace; title: string; summary: string; direct?: boolean }): string {
     const key = `w-${shortId(8)}`
     const now = Date.now()
     const eff = effective(this.cfg, o.workspace)
-    const cwd = workerDir(o.workspace, key)
+    const cwd = o.direct ? o.workspace.dir : workerDir(o.workspace, key)
     mkdirSync(cwd, { recursive: true })
     this.store.insertSession({
       key, role: 'worker', workspace: o.workspace.name, sessionId: randomUUID(), status: 'stopped', pinned: false,
       model: eff.workerModel, cwd, createdAt: now, lastActiveAt: now, turns: 0,
     })
-    this.store.insertWorker({ key, workspace: o.workspace.name, title: o.title.slice(0, 60), summary: o.summary.slice(0, 300), threads: [], repos: {} })
+    this.store.insertWorker({
+      key, workspace: o.workspace.name, title: o.title.slice(0, 60), summary: o.summary.slice(0, 300), threads: [], repos: {},
+      ...(o.direct ? { direct: true } : {}),
+    })
     this.status.changed()
     return key
   }
@@ -662,15 +666,17 @@ export class Hub {
     const title = worker?.title ?? key
     const files = writeSessionFiles({
       paths: this.p, key, role: row.role, workspace: w, bunBin: this.deps.bunBin, root: ROOT,
-      prompt: row.role === 'router' ? routerPrompt(w.name, routerPersona(this.cfg, w).text) : workerPrompt(w.name, title, key),
+      prompt: row.role === 'router' ? routerPrompt(w.name, routerPersona(this.cfg, w).text) : worker?.direct ? directPrompt(w.name, title, key) : workerPrompt(w.name, title, key),
       permissionMode: row.role === 'router' ? 'dontAsk' : eff.workerPermissionMode,
       disablePlugins: this.cfg.disablePlugins,
       reports: this.cfg.workerReports,
+      ...(worker?.direct ? { direct: true } : {}),
       ...(launch.apiKeyHelper ? { apiKeyHelper: launch.apiKeyHelper } : {}),
     })
     const model = (row.role === 'router' ? launch.routerModel : launch.workerModel) ?? row.model
     const thread = this.store.threadByRouter(key)
-    const addDirs = row.role === 'router'
+    // Routers and direct sessions run in the workspace folder (knowledge/ and inbox/ inside it) and use the repos where they are.
+    const addDirs = row.role === 'router' || worker?.direct
       ? externalRepoPaths(w)
       : [join(w.dir, 'knowledge'), join(w.dir, 'inbox'), ...externalRepoPaths(w).filter(p => !existsSync(join(p, '.git')))]
     for (const d of [join(w.dir, 'inbox'), row.cwd]) mkdirSync(d, { recursive: true })
@@ -997,6 +1003,24 @@ export class Hub {
     if (r !== 'live') log('lifecycle', `${key}: restart → ${r}`)
   }
 
+  /**
+   * Opens a direct session (store.ts WorkerRow.direct) in workspace `name` and starts
+   * it: the panel's New session, `mmhub session new`. Call on the chain.
+   */
+  async newDirectSession(name: string): Promise<{ ok: boolean; message: string; key?: string }> {
+    const w = this.ws(name)
+    if (!w) return { ok: false, message: `no workspace ${name.slice(0, 40)}` }
+    const n = Math.max(0, ...this.store.workers(w.name).map(x => Number(/^Direct session (\d+)$/.exec(x.title)?.[1] ?? 0))) + 1
+    const title = `Direct session ${n}`
+    const key = this.createWorker({ workspace: w, title, summary: '', direct: true })
+    log('lifecycle', `${key}: direct session opened in ${w.name}`)
+    const label = `${key} (${title})`
+    const r = await this.ensureStarted(key)
+    if (r === 'failed') return { ok: false, message: `couldn't start ${label} — see mmhub logs`, key }
+    if (r === 'waiting') return { ok: true, message: `opened ${label}; it waits for a free worker slot (${this.cap('worker')} live): Wake it once one frees`, key }
+    return { ok: true, message: `starting ${label} in ${w.dir} — attach: tmux -L ${this.cfg.tmuxSocket} attach -t ${tmuxName(key)}`, key }
+  }
+
   /** Start/resume a stopped session, or retry now one that waits after an API error. Call on the chain. */
   async wake(key: string): Promise<{ ok: boolean; message: string }> {
     const row = this.store.session(key)
@@ -1116,7 +1140,7 @@ export class Hub {
       const t = this.store.threadByRouter(key)
       // The persona rides in the context too: the system prompt is fixed when a session is created, the context is re-sent at every resume.
       return routerContext(w, {
-        threadId: t?.id ?? '?', permalink: t ? this.permalink(t.id) : '?', workers: this.store.workers(w.name),
+        threadId: t?.id ?? '?', permalink: t ? this.permalink(t.id) : '?', workers: this.store.routerWorkers(w.name),
         persona: routerPersona(this.cfg, w).text, reports: this.cfg.workerReports,
         // In a DM every message reaches the router, so it hears nothing about Laya or unfollow.
         trigger: t && inDM(this, t.id) ? 'mention' : effective(this.cfg, w).trigger,
@@ -1125,6 +1149,7 @@ export class Hub {
       })
     }
     const worker = this.store.worker(key)
+    if (worker?.direct) return directContext(w)
     return worker ? workerContext(w, { worker, reports: this.cfg.workerReports, trigger: effective(this.cfg, w).trigger }) : undefined
   }
 

@@ -26,6 +26,8 @@ import { tmuxName, transcriptPath } from '../src/hub/spawn'
 import type { Tmux } from '../src/hub/tmux'
 import { bindChannel, createWorkspace, loadBindings, loadWorkspace, setWorkspaceProviders, setWorkspaceTrigger, type Workspace } from '../src/hub/workspaces'
 import { saveProviders, secretFile, writeSecret } from '../src/hub/providers'
+import { Store } from '../src/hub/store'
+import { Database } from 'bun:sqlite'
 
 const T = 30_000
 let savedConfigDir: string | undefined
@@ -44,7 +46,7 @@ afterAll(() => {
 
 class FakeTmux {
   alive = new Set<string>()
-  launches: { name: string; argv: string[]; env: Record<string, string> }[] = []
+  launches: { name: string; cwd: string; argv: string[]; env: Record<string, string> }[] = []
   async newSession(o: { name: string; cwd: string; argv: string[]; env: Record<string, string> }) {
     this.alive.add(o.name)
     // A login check runs its command, as tmux would (with only the env it was given).
@@ -53,7 +55,7 @@ class FakeTmux {
       Bun.spawn(o.argv, { cwd: o.cwd, env: o.env, stdin: 'ignore', stdout: 'ignore', stderr: 'ignore' })
       return
     }
-    this.launches.push({ name: o.name, argv: o.argv, env: o.env })
+    this.launches.push({ name: o.name, cwd: o.cwd, argv: o.argv, env: o.env })
   }
   authChecks: { name: string; argv: string[]; env: Record<string, string> }[] = []
   async has(n: string) { return this.alive.has(n) }
@@ -1068,6 +1070,8 @@ describe('personal workspaces', () => {
     expect(hub.store.thread('DM1')).toMatchObject({ channelId: 'D1', workspace: 'personal-U1' })
     expect(workspaceTitle(hub, 'personal-U1')).toBe("@alice's personal workspace")
     expect(workspaceTitle(hub, 'demo')).toBe('workspace demo')
+    const labels = () => Object.fromEntries(hub.snapshot().workspaces.map(w => [w.name, w.label]))
+    expect(labels()).toEqual({ demo: undefined, 'personal-U1': '@alice' }) // the panel shows whose it is
     expect(loadBindings(p.bindings)['D1']).toBe('personal-U1')
     expect(loadWorkspace(hub.cfg, 'personal-U1')).toMatchObject({ description: 'Personal workspace of @alice', repos: [] })
     expect(hub.queued(hub.store.thread('DM1')!.routerKey)).toBe(1) // the message waits for its router
@@ -1648,6 +1652,17 @@ describe('adding repos', () => {
     expect(repos()).toEqual(['api', 'slow', 'app', 'notes'])
     expect(posts).toEqual([]) // the router tells the person itself
   }, T)
+
+  test('a direct session works in the original checkouts, so a git repo outside the workspace restarts it too', async () => {
+    const { hub, tmux, rkey, tools } = scene()
+    const { key } = await hub.enqueue(() => hub.newDirectSession('demo'))
+    await connect(hub, tmux, key!, 1)
+    const app = join(tools, 'app')
+    mkdirSync(join(app, '.git'), { recursive: true })
+    expect(await handleCall(hub, rkey, 'add_repo', { source: app, message_id: 'M1' })).toContain('and so does 1 other live session of the workspace')
+    await until('the direct session restarts', () => tmux.launches.length === 2)
+    expect(tmux.launches[1]!.argv.join(' ')).toContain(`--add-dir ${app}`)
+  }, T)
 })
 
 describe('scheduled jobs', () => {
@@ -1899,4 +1914,78 @@ printf '{"loggedIn": %s, "authMethod": "%s", "apiProvider": "firstParty", "orgNa
     expect(await control(hub, 'provider', { op: 'check', name: 'tok' }, () => {})).toMatchObject({ ok: true, data: { loggedIn: true } })
     expect(await control(hub, 'provider', { op: 'check', name: 'nope' }, () => {})).toEqual({ ok: false, message: 'no provider nope' })
   }, T)
+})
+
+describe("direct sessions (the panel's New session)", () => {
+  test('an owner opens one in the workspace folder: started at once, its own prompt, the attach command in the answer', async () => {
+    const { hub, tmux, w } = setup()
+    const res = await control(hub, 'session', { op: 'new', workspace: 'demo' }, () => {})
+    expect(res.ok).toBe(true)
+    const key = (res.data as { key: string }).key
+    expect(key).toMatch(/^w-[a-z0-9]+$/)
+    expect(res.message).toBe(`starting ${key} (Direct session 1) in ${w.dir} — attach: tmux -L ${hub.cfg.tmuxSocket} attach -t ${tmuxName(key)}`)
+    expect(hub.store.session(key)).toMatchObject({ role: 'worker', workspace: 'demo', cwd: w.dir })
+    expect(hub.store.worker(key)).toMatchObject({ title: 'Direct session 1', direct: true, threads: [] })
+
+    await connect(hub, tmux, key, 1)
+    const launch = tmux.launches[0]!
+    expect(launch.cwd).toBe(w.dir)
+    const prompt = readFileSync(launch.argv[launch.argv.indexOf('--append-system-prompt-file') + 1]!, 'utf8')
+    expect(prompt).toContain('direct session "Direct session 1"')
+    expect(prompt).toContain('they read and type in this terminal')
+    expect(prompt).not.toContain('Nobody reads this terminal')
+    const env = (k: string) => JSON.parse(readFileSync(join(hub.p.sessions, k, 'mcp.json'), 'utf8')).mcpServers.mmhub.env
+    expect(env(key)).toMatchObject({ MMHUB_ROLE: 'worker', MMHUB_DIRECT: '1' }) // the bridge: no posting tools, answer here
+    const ctx = hub.hookContext(key)!
+    expect(ctx).toContain(`Workspace "demo" at ${w.dir}`)
+    expect(ctx).toContain('Repos (work in them where they are):')
+    expect(ctx).not.toContain('do not edit')
+    expect(ctx).not.toContain('reply(thread_id')
+
+    // The next one is numbered on.
+    const second = await control(hub, 'session', { op: 'new', workspace: 'demo' }, () => {})
+    expect(hub.store.worker((second.data as { key: string }).key)!.title).toBe('Direct session 2')
+  }, T)
+
+  test("routers don't see one, can't hand it a task, and the cleanup job leaves it alone", async () => {
+    const { hub, w } = setup()
+    const direct = hub.createWorker({ workspace: w, title: 'Direct session 1', summary: '', direct: true })
+    const fixer = hub.createWorker({ workspace: w, title: 'Fixer', summary: 'fixes things' })
+    const rkey = hub.createRouter({ threadId: 'T2', channelId: 'C1', workspace: w, label: 'thread two' })
+
+    const listed = await handleCall(hub, rkey, 'list_workers', {})
+    expect(listed).toContain(fixer)
+    expect(listed).not.toContain(direct)
+    expect(hub.hookContext(rkey)).toContain(fixer)
+    expect(hub.hookContext(rkey)).not.toContain(direct)
+    const thread = hub.store.thread('T2')!
+    await expect(delegate(hub, { thread, workerKey: direct, task: 'x', messageIds: [] })).rejects.toThrow(`no worker ${direct} in workspace demo`)
+
+    // A day without work: workers clear their build output, but this one works in the original checkouts.
+    hub.store.patchSession(direct, { lastActiveAt: Date.now() - 100 * 3_600_000 })
+    await hub.enqueue(() => hub.cleanupDue())
+    expect(hub.store.messagesFor(direct, ['queued', 'delivered'])).toEqual([])
+  }, T)
+
+  test('an unknown workspace is refused, and nothing starts', async () => {
+    const { hub, tmux } = setup()
+    expect(await control(hub, 'session', { op: 'new', workspace: 'nope' }, () => {})).toEqual({ ok: false, message: 'no workspace nope' })
+    expect(await control(hub, 'session', { op: 'new' }, () => {})).toEqual({ ok: false, message: 'which workspace? mmhub session new <workspace>' })
+    expect(hub.store.sessions({ role: 'worker' })).toEqual([])
+    expect(tmux.launches).toEqual([])
+  })
+
+  test('a state database from before direct sessions gets the column', () => {
+    const file = join(mkdtempSync(join(tmpdir(), 'mmhub-store-')), 'hub.db')
+    const old = new Database(file)
+    old.exec(`CREATE TABLE workers (key TEXT PRIMARY KEY, workspace TEXT NOT NULL, title TEXT NOT NULL, summary TEXT NOT NULL DEFAULT '',
+      threads TEXT NOT NULL DEFAULT '[]', repos TEXT NOT NULL DEFAULT '{}', active_thread TEXT, active_task INTEGER, last_post TEXT)`)
+    old.exec(`INSERT INTO workers (key, workspace, title) VALUES ('w-old', 'demo', 'Fixer')`)
+    old.close()
+    const store = new Store(file)
+    expect(store.worker('w-old')!.direct).toBeUndefined()
+    store.insertWorker({ key: 'w-new', workspace: 'demo', title: 'Direct session 1', summary: '', threads: [], repos: {}, direct: true })
+    expect(store.worker('w-new')!.direct).toBe(true)
+    store.close()
+  })
 })

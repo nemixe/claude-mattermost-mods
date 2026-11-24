@@ -106,6 +106,8 @@ export function writeSessionFiles(o: {
   disablePlugins: string[]
   /** Where workers' reports go (the bridge words its tools to match). */
   reports: 'router' | 'thread'
+  /** A direct session (store.ts WorkerRow.direct): the bridge offers it no posting tools. */
+  direct?: boolean
   /** The provider's API key helper (a command printing the key), when it uses one. */
   apiKeyHelper?: string
 }): SessionFiles {
@@ -120,7 +122,7 @@ export function writeSessionFiles(o: {
       mmhub: {
         command: o.bunBin,
         args: [join(o.root, 'src', 'bridge', 'server.ts')],
-        env: { MMHUB_SESSION_KEY: o.key, MMHUB_ROLE: o.role, MMHUB_STATE_DIR: o.paths.dir, MMHUB_REPORTS: o.reports },
+        env: { MMHUB_SESSION_KEY: o.key, MMHUB_ROLE: o.role, MMHUB_STATE_DIR: o.paths.dir, MMHUB_REPORTS: o.reports, ...(o.direct ? { MMHUB_DIRECT: '1' } : {}) },
       },
     },
   }

@@ -111,6 +111,18 @@ Rules:
 `
 }
 
+/** A direct session's: an owner opened it to work with by hand (store.ts WorkerRow.direct). */
+export function directPrompt(ws: string, title: string, key: string): string {
+  return `# Role: direct session "${title}" (\`${key}\`, workspace "${ws}")
+
+A hub owner opened this session to work with you directly: they read and type in this terminal, so answer here, as in any Claude Code session. You run in the workspace folder itself, not in a worker's worktree, and work in the repos where they are.
+
+Rules:
+- No Mattermost thread is tied to you and no router hands you tasks: you can read the workspace's channels, but nothing you write is posted there.
+- Record durable knowledge (decisions, gotchas, how-tos) as short notes in the workspace \`knowledge/\` folder.
+`
+}
+
 /** How a worker reports (in its SessionStart context, so it reaches resumed sessions too). */
 export function workerReportingRules(reports: WorkerReports): string {
   const where = reports === 'router'
@@ -187,6 +199,16 @@ Your summary: ${o.worker.summary || '(empty — set it with update_summary)'}
 
 How you report (the current rules; they replace anything earlier about posting):
 ${workerReportingRules(o.reports)}${triggerNote(w, 'worker', o.trigger ?? 'mention')}`
+}
+
+/** A direct session's SessionStart context. */
+export function directContext(w: Workspace): string {
+  return `mmhub context (refreshed at every start/resume):
+Workspace "${w.name}" at ${w.dir}${w.description ? ` — ${w.description}` : ''}
+Knowledge: ${w.dir}/knowledge
+Repos (work in them where they are):
+${repoLines(w)}
+The person who opened you reads this terminal: answer here.`
 }
 
 /**

@@ -1,5 +1,5 @@
 /**
- * Control ops from `mmhub` (and so from the panel mod): session stop / wake /
+ * Control ops from `mmhub` (and so from the panel mod): session new / stop / wake /
  * restart / pin / unpin, scheduled jobs, status, reload, shutdown. Answers are
  * `{ok, message}`.
  */
@@ -59,6 +59,14 @@ export async function control(hub: Hub, op: string, args: Record<string, unknown
       const sub = String(args.op ?? '')
       const key = String(args.key ?? '')
       const now = args.now === true
+      if (sub === 'new') {
+        // A direct session in a workspace: an owner works with it by hand in its terminal.
+        const name = String(args.workspace ?? '')
+        if (!name) return { ok: false, message: 'which workspace? mmhub session new <workspace>' }
+        const res = await hub.enqueue(() => hub.newDirectSession(name))
+        hub.status.write()
+        return { ok: res.ok, message: res.message, ...(res.key ? { data: { key: res.key } } : {}) }
+      }
       if (sub === 'restart' && (key === 'all' || key === 'workers' || key === 'routers')) {
         const res = await hub.enqueue(() => hub.restartAll(key === 'all' ? undefined : key === 'workers' ? 'worker' : 'router', now))
         hub.status.write()
@@ -85,7 +93,7 @@ export async function control(hub: Hub, op: string, args: Record<string, unknown
             hub.patch(key, { pinned: sub === 'pin' })
             return { ok: true, message: `${sub === 'pin' ? 'pinned' : 'unpinned'} ${label}` }
           default:
-            return { ok: false, message: `unknown session op ${sub} (stop|wake|restart|pin|unpin)` }
+            return { ok: false, message: `unknown session op ${sub} (new|stop|wake|restart|pin|unpin)` }
         }
       })
       hub.status.write() // the panel re-reads right after the CLI answers

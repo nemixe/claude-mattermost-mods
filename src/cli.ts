@@ -7,6 +7,9 @@
  *   mmhub status [--json]           hub, workspaces and sessions
  *   mmhub logs [-n N] [-f]          hub log
  *   mmhub doctor                    check the setup
+ *   mmhub session new <workspace> [--json]
+ *                                   a direct session: a worker in the workspace folder itself, started now, that
+ *                                   you attach to (tmux) and work with by hand; routers don't hand it tasks
  *   mmhub session <stop|wake|pin|unpin> <key> [--json]
  *   mmhub session restart <key|all|workers|routers> [--now] [--json]
  *                                   restart with current settings, keeping the conversation:
@@ -83,7 +86,7 @@ import {
 } from './hub/providers'
 import { PROVIDER_UNSET, shq } from './hub/spawn'
 import { readAuthStatus, type AuthStatus } from './hub/authcheck'
-import { addRepo, bindChannel, channelsOf, effective, setWorkspaceTrigger, createWorkspace, ensureTemplate, listWorkspaces, loadBindings, loadWorkspace, removeRepo, setWorkspaceProviders, TEMPLATE_DIR, unbindChannel, validName } from './hub/workspaces'
+import { addRepo, bindChannel, channelsOf, effective, setWorkspaceTrigger, createWorkspace, ensureTemplate, listWorkspaces, loadBindings, loadWorkspace, personalOwner, removeRepo, setWorkspaceProviders, TEMPLATE_DIR, unbindChannel, validName } from './hub/workspaces'
 
 const argv = process.argv.slice(2)
 const json = argv.includes('--json')
@@ -263,7 +266,7 @@ async function status(): Promise<never> {
   lines.push(`mattermost ${snap.mattermost.connected ? '●' : '○'} ${snap.mattermost.url}${snap.mattermost.bot ? ` as @${snap.mattermost.bot}` : ''}`)
   lines.push(`live: routers ${snap.caps.liveRouters}/${snap.caps.maxLiveRouters}, workers ${snap.caps.liveWorkers}/${snap.caps.maxLiveWorkers}`)
   for (const w of snap.workspaces) {
-    lines.push('', `workspace ${w.name} — ${w.path}`)
+    lines.push('', `workspace ${w.name}${w.label ? ` (${w.label})` : ''} — ${w.path}`)
     lines.push(`  channels: ${w.channels.map(c => c.name).join(', ') || 'none'} · repos: ${w.repos.map(r => r.name).join(', ') || 'none'}`)
     if (w.provider) lines.push(`  provider: ${providerSummary(w.provider, now)}`)
     for (const s of w.sessions) lines.push(sessionRow(s, now) + (s.provider && w.provider && s.provider !== w.provider.active ? `  (on ${s.provider})` : ''))
@@ -366,7 +369,13 @@ async function doctor(): Promise<never> {
 
 async function session(): Promise<never> {
   const [, op, key] = args
-  const usage = 'usage: mmhub session <stop|wake|pin|unpin> <key> | mmhub session restart <key|all|workers|routers> [--now]'
+  const usage = 'usage: mmhub session new <workspace> | mmhub session <stop|wake|pin|unpin> <key> | mmhub session restart <key|all|workers|routers> [--now]'
+  if (op === 'new') {
+    if (!key) out(false, usage)
+    if (!(await hubRunning())) out(false, 'hub is not running — start it first')
+    const r = await controlOp('session', { op, workspace: key }, 90_000)
+    out(r.ok, r.text ?? r.error ?? (r.ok ? 'ok' : 'failed'))
+  }
   if (!op || !['stop', 'wake', 'restart', 'pin', 'unpin'].includes(op)) out(false, usage)
   const group = op === 'restart' && (key === 'all' || key === 'workers' || key === 'routers')
   if (!key || (!group && !SESSION_KEY_RE.test(key))) out(false, `malformed session key: ${String(key).slice(0, 40)}`)
@@ -390,7 +399,8 @@ async function ws(): Promise<never> {
       if (!all.length) out(true, `no workspaces in ${cfg.workspacesDir} — mmhub ws create <name> (copied from ${tpl})`)
       for (const w of all) {
         const ch = Object.entries(bindings).filter(([, n]) => n === w.name).map(([c]) => c)
-        console.log(`${w.name}  ${w.dir}\n  repos: ${w.repos.map(r => `${r.name}=${r.path}`).join(', ') || 'none'}\n  channels: ${ch.join(', ') || 'none'}`)
+        const owner = personalOwner(w)
+        console.log(`${w.name}${owner ? ` (@${owner})` : ''}  ${w.dir}\n  repos: ${w.repos.map(r => `${r.name}=${r.path}`).join(', ') || 'none'}\n  channels: ${ch.join(', ') || 'none'}`)
       }
       process.exit(0)
     }

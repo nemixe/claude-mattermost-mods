@@ -20,6 +20,7 @@ import { instructionsFor, toolsFor, type Reports } from './tools'
 const KEY = process.env.MMHUB_SESSION_KEY ?? ''
 const ROLE: Role = process.env.MMHUB_ROLE === 'worker' ? 'worker' : 'router'
 const REPORTS: Reports = process.env.MMHUB_REPORTS === 'thread' ? 'thread' : 'router'
+const DIRECT = process.env.MMHUB_DIRECT === '1'
 const SOCK = paths().sock
 
 function log(msg: string): void {
@@ -36,7 +37,7 @@ const mcp = new Server(
         ...(ROLE === 'worker' ? { 'claude/channel/permission': {} } : {}),
       },
     },
-    instructions: instructionsFor(ROLE, REPORTS),
+    instructions: instructionsFor(ROLE, REPORTS, DIRECT),
   },
 )
 
@@ -133,7 +134,7 @@ function call(tool: string, args: Record<string, unknown>): Promise<Extract<HubM
 
 // ---------------------------------------------------------------- MCP side
 
-mcp.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: toolsFor(ROLE, REPORTS) }))
+mcp.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: toolsFor(ROLE, REPORTS, DIRECT) }))
 
 mcp.setRequestHandler(CallToolRequestSchema, async req => {
   const r = await call(req.params.name, (req.params.arguments ?? {}) as Record<string, unknown>)

@@ -24,7 +24,8 @@ the official Telegram channel plugin does, but with many sessions:
   opens a thread and gives the workspace's router the instruction, so recurring work
   runs without anyone posting (see [Scheduled jobs](#scheduled-jobs)).
 - **A panel in Claude Code** (`/mm`) listing workspaces and their live and stopped
-  sessions, with Stop / Wake / Restart / Pin / Copy attach.
+  sessions, with Stop / Wake / Restart / Pin / Copy attach, and **New session** to open
+  a session in a workspace's folder that you work with yourself.
 
 Every session is a real interactive `claude` in tmux: `tmux -L mmhub attach -t mmw-<id>`.
 
@@ -122,7 +123,8 @@ the `/mm` panel. The CLI is `bun ~/claude-mattermost-mods/bin/mmhub` (alias it t
   workspace creates `personal-<your user id>` from the [template](#workspace-template),
   binds the chat to it and starts the thread there, without asking "which workspace?".
   Later DMs go to the same workspace; add repos to it like to any other
-  (`mmhub repo add personal-<id> …`). A chat bound to another workspace stays there
+  (`mmhub repo add personal-<id> …`; `/mm`, `mmhub status` and `mmhub ws list` show whose
+  each one is, as `@user`). A chat bound to another workspace stays there
   (`mmhub ws bind <ws> <dm-channel-id>`). `personalWorkspaces: false` in `config.json`
   brings back the question.
 - `@claude every weekday at 9, check the alerts dashboard and post anything red` (an
@@ -502,6 +504,7 @@ notes, `.claude/settings.json` permission rules, `.mcp.json` servers or any othe
 
 ```
 mmhub start | stop | status [--json] | logs [-n N] [-f] | doctor | reload
+mmhub session new <workspace> [--json]                 # a direct session in the workspace folder
 mmhub session <stop|wake|pin|unpin> <key> [--json]     # {"ok":bool,"message":string}
 mmhub session restart <key|all|workers|routers> [--now] # after the current turn, or right away
 mmhub ws list | create <name> [desc] | bind <ws> <channel-id> | unbind <channel-id> | show <name> | template
@@ -587,13 +590,22 @@ inside the hub's tmux (`tmux -L mmhub new-session -s mmhub-login claude`, then
 
 ## How sessions are launched
 
-| | router | worker |
-| --- | --- | --- |
-| cwd | `<ws>` | `<ws>/.worktrees/<id>` (still loads `<ws>/CLAUDE.md`) |
-| model | `routerModel` + `--effort low` | `workerModel` |
-| tools | `--tools Read,Grep,Glob`, `--permission-mode dontAsk` | default tools, `workerPermissionMode` |
-| extra dirs | repos outside the workspace | `knowledge/`, `inbox/` |
-| always | `--mcp-config` (bridge `mmhub` + workspace `.mcp.json`) `--strict-mcp-config`, generated `--settings` (hooks + workspace settings), `--setting-sources project,local`, `--append-system-prompt-file`, `--dangerously-load-development-channels server:mmhub` | same |
+| | router | worker | direct session |
+| --- | --- | --- | --- |
+| cwd | `<ws>` | `<ws>/.worktrees/<id>` (still loads `<ws>/CLAUDE.md`) | `<ws>` |
+| model | `routerModel` + `--effort low` | `workerModel` | `workerModel` |
+| tools | `--tools Read,Grep,Glob`, `--permission-mode dontAsk` | default tools, `workerPermissionMode` | same as a worker |
+| extra dirs | repos outside the workspace | `knowledge/`, `inbox/` | repos outside the workspace |
+| always | `--mcp-config` (bridge `mmhub` + workspace `.mcp.json`) `--strict-mcp-config`, generated `--settings` (hooks + workspace settings), `--setting-sources project,local`, `--append-system-prompt-file`, `--dangerously-load-development-channels server:mmhub` | same | same |
+
+**Direct sessions.** The panel's **New session** on a workspace (or `mmhub session new
+<ws>`) opens a session for you to work with yourself: a worker (`w-<id>`, titled
+`Direct session N`) that runs in the workspace folder itself and works on the repos where
+they are, not in worktrees. It starts right away; attach with the row's **Copy attach**
+(`tmux -L mmhub attach -t mmw-<id>`), which the answer also shows. No thread is tied to
+it: its permission prompts are answered in its terminal, routers don't see it or hand it
+tasks, and its hub tools read the workspace's channels but post nothing. It counts toward `maxLiveWorkers` and closes when idle like any worker, unless
+pinned or attached, and **Wake** resumes it with its conversation.
 
 User-level plugins and settings don't load in spawned sessions (`--setting-sources
 project,local`), so another channel plugin can't grab them. Spike findings behind these
@@ -622,7 +634,8 @@ without work, and none while it is pinned, failed or has a task waiting; a task 
 comes in first drops the job. The job runs unattended, as with `bypassPermissions`:
 whatever the worker's permission mode, its permission prompts are allowed at once (no
 🔐 post), and each one is logged in `hub.log` (`perm: … cleanup — allowed …`). Routers
-can't run commands, so they get no job. `cleanupHours: 0` turns it off, in `config.json` or a workspace's
+can't run commands, so they get no job, and neither do direct sessions, which work in the
+original checkouts. `cleanupHours: 0` turns it off, in `config.json` or a workspace's
 `workspace.json`.
 
 **Sleep.** Bun timers pending while macOS sleeps can stay stuck after it wakes (seen

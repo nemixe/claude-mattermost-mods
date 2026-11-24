@@ -65,6 +65,11 @@ export function personalName(userId: string): string {
   return `personal-${userId}`
 }
 
+/** The username of the person a personal workspace belongs to (from the description the hub gave it). */
+export function personalOwner(w: Pick<WorkspaceManifest, 'name' | 'description'> | undefined): string | undefined {
+  return w?.name.startsWith('personal-') ? /@([\w.-]+)/.exec(w.description ?? '')?.[1] : undefined
+}
+
 export function validName(name: string): boolean {
   return WORKSPACE_NAME_RE.test(name) && !name.includes('..') && name !== TEMPLATE_DIR
 }

@@ -7,7 +7,7 @@ import type { HubSnapshot, SessionSnapshot, WorkspaceProvider, WorkspaceSnapshot
 import { writeJsonAtomic } from '../shared/util'
 import { closesAt, isLive, type ReapView } from './lifecycle'
 import type { SessionRow, ThreadRow, WorkerRow } from './store'
-import type { Workspace } from './workspaces'
+import { personalOwner, type Workspace } from './workspaces'
 
 export type SnapshotInput = {
   hub: HubSnapshot['hub']
@@ -87,6 +87,8 @@ export function buildSnapshot(i: SnapshotInput): HubSnapshot {
         .sort((a, b) => Number(isLive(b.status)) - Number(isLive(a.status)) || b.lastActiveAt - a.lastActiveAt),
     }
     if (w.description) ws.description = w.description
+    const owner = personalOwner(w)
+    if (owner) ws.label = `@${owner}`
     const prov = i.provider?.(w)
     if (prov) ws.provider = prov
     return ws

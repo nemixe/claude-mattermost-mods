@@ -71,6 +71,12 @@ export type WorkerRow = {
   activeThread?: string
   activeTask?: number
   lastPost?: string
+  /**
+   * A direct session: an owner opened it (the panel's New session, `mmhub session new`)
+   * to work with by hand in its terminal. It runs in the workspace folder itself;
+   * routers don't see it or hand it tasks, and it gets no cleanup job.
+   */
+  direct?: boolean
 }
 
 export type TaskState = 'queued' | 'delivered' | 'ended' | 'failed' | 'interrupted'
@@ -111,7 +117,7 @@ CREATE TABLE IF NOT EXISTS threads (
 CREATE TABLE IF NOT EXISTS workers (
   key TEXT PRIMARY KEY, workspace TEXT NOT NULL, title TEXT NOT NULL, summary TEXT NOT NULL DEFAULT '',
   threads TEXT NOT NULL DEFAULT '[]', repos TEXT NOT NULL DEFAULT '{}',
-  active_thread TEXT, active_task INTEGER, last_post TEXT
+  active_thread TEXT, active_task INTEGER, last_post TEXT, direct INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS tasks (
   id INTEGER PRIMARY KEY AUTOINCREMENT, worker_key TEXT NOT NULL, thread_id TEXT NOT NULL, channel_id TEXT NOT NULL,
@@ -275,6 +281,7 @@ function toWorker(r: Raw): WorkerRow {
     key: String(r.key), workspace: String(r.workspace), title: String(r.title), summary: String(r.summary ?? ''),
     threads: JSON.parse(String(r.threads ?? '[]')), repos: JSON.parse(String(r.repos ?? '{}')),
     activeThread: s(r.active_thread), activeTask: n(r.active_task), lastPost: s(r.last_post),
+    ...(r.direct ? { direct: true } : {}),
   }
 }
 function toTask(r: Raw): TaskRow {
@@ -308,6 +315,9 @@ export class Store {
     this.db = new Database(file, { create: true })
     this.db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 3000;')
     this.db.exec(SCHEMA)
+    // Columns added since a table was first made (CREATE TABLE IF NOT EXISTS leaves an existing table as it was).
+    const has = (table: string, col: string) => (this.db.query(`PRAGMA table_info(${table})`).all() as { name: string }[]).some(c => c.name === col)
+    if (!has('workers', 'direct')) this.db.exec('ALTER TABLE workers ADD COLUMN direct INTEGER NOT NULL DEFAULT 0')
   }
 
   // ---------------------------------------------------------------- sessions
@@ -420,9 +430,14 @@ export class Store {
     return (this.db.query('SELECT * FROM workers WHERE workspace = ?').all(workspace) as Raw[]).map(toWorker)
   }
 
+  /** The workers routers see and hand tasks to: all but direct sessions. */
+  routerWorkers(workspace: string): WorkerRow[] {
+    return this.workers(workspace).filter(w => !w.direct)
+  }
+
   insertWorker(w: WorkerRow): void {
-    this.db.query('INSERT INTO workers (key, workspace, title, summary, threads, repos) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(w.key, w.workspace, w.title, w.summary, JSON.stringify(w.threads), JSON.stringify(w.repos))
+    this.db.query('INSERT INTO workers (key, workspace, title, summary, threads, repos, direct) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(w.key, w.workspace, w.title, w.summary, JSON.stringify(w.threads), JSON.stringify(w.repos), w.direct ? 1 : 0)
   }
 
   patchWorker(key: string, p: Partial<Omit<WorkerRow, 'key' | 'workspace'>>): void {
