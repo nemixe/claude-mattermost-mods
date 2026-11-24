@@ -72,7 +72,7 @@ export type WorkerRow = {
   activeTask?: number
   lastPost?: string
   /**
-   * A direct session: an owner opened it (the panel's New session, `mmhub session new`)
+   * A direct session: an owner opened it (`mmhub session new`)
    * to work with by hand in its terminal. It runs in the workspace folder itself;
    * routers don't see it or hand it tasks, and it gets no cleanup job.
    */

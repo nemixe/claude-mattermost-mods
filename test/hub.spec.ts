@@ -1916,7 +1916,7 @@ printf '{"loggedIn": %s, "authMethod": "%s", "apiProvider": "firstParty", "orgNa
   }, T)
 })
 
-describe("direct sessions (the panel's New session)", () => {
+describe('direct sessions (mmhub session new)', () => {
   test('an owner opens one in the workspace folder: started at once, its own prompt, the attach command in the answer', async () => {
     const { hub, tmux, w } = setup()
     const res = await control(hub, 'session', { op: 'new', workspace: 'demo' }, () => {})

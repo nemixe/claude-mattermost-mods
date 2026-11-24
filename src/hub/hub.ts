@@ -1005,7 +1005,7 @@ export class Hub {
 
   /**
    * Opens a direct session (store.ts WorkerRow.direct) in workspace `name` and starts
-   * it: the panel's New session, `mmhub session new`. Call on the chain.
+   * it (`mmhub session new`). Call on the chain.
    */
   async newDirectSession(name: string): Promise<{ ok: boolean; message: string; key?: string }> {
     const w = this.ws(name)

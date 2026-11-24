@@ -24,8 +24,6 @@ export const PANE_TITLE = 'Mattermost Hub'
 export const STALE_MS = 15_000
 /** Session keys the CLI accepts; anything else never reaches argv. */
 export const KEY_RE = /^(r|w)-[a-z0-9]+$/
-/** Workspace names the hub accepts (its WORKSPACE_NAME_RE); anything else never reaches argv. */
-export const WORKSPACE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 /** How many stopped sessions an expanded group lists before "+N more". */
 const STOPPED_SHOWN = 20
 
@@ -275,24 +273,61 @@ export async function sessionOp(
   return answer.ok
 }
 
+let isSelecting = false
+
 /**
- * `mmhub session new <workspace> --json`: a direct session, started in the
- * workspace folder, to attach to and work with by hand. The name is checked
- * before it is passed.
+ * Replaces the open Claude Code session with a new one in the workspace folder:
+ * `/clear` (the old conversation stays in its own folder's `/resume`, and isn't
+ * moved along), `/cd`, and `/clear` again inside. They wait for the running turn,
+ * and `/cd` asks before it enters a folder for the first time, so this can
+ * outlast a press's 10 s: call it without awaiting it.
+ *
+ * Only the terminal has `/cd`. Elsewhere the session is left alone and the command
+ * that starts one there goes on the clipboard.
  */
-export async function newSession(
+export async function selectWorkspace(
   $: EngineInterface,
-  snapshot: HubSnapshot,
-  workspace: string,
-): Promise<boolean> {
-  if (!WORKSPACE_RE.test(workspace)) {
-    $.ui.toast(`mm: refused a malformed workspace name (${workspace.slice(0, 40)})`)
-    return false
+  w: WorkspaceSnapshot,
+  surface: RenderSurface,
+): Promise<void> {
+  if (isSelecting) {
+    $.ui.toast('mm: still switching sessions')
+    return
   }
-  const { bunBin, cliPath } = snapshot.hub
-  const answer = await runCli($, [bunBin, cliPath, 'session', 'new', workspace, '--json'], 90_000)
-  toastAnswer($, answer)
-  return answer.ok
+  isSelecting = true
+  try {
+    // A path that isn't one plain absolute line is never handed to a command.
+    if (!/^\/[^\x00-\x1f\x7f]*$/.test(w.path)) {
+      $.ui.toast(`mm: refused a malformed workspace folder (${w.name.slice(0, 40)})`)
+      return
+    }
+    const stat = await $.fs.stat(w.path, { resolve: true }).catch(() => undefined)
+    if (stat?.kind !== 'dir') {
+      $.ui.toast(`mm: no folder ${w.path} on this machine`)
+      return
+    }
+    const offered = (await $.command.list()).map(c => c.name)
+    if (!offered.includes('clear') || !offered.includes('cd')) {
+      const text = `cd '${w.path.replace(/'/g, `'\\''`)}' && claude`
+      const copied = await $.ui.copy({ text, surface })
+      $.ui.toast(`mm: this app can't move a session to another folder. ${copied.isCopied ? 'Copied' : 'Run'}: ${text}`)
+      return
+    }
+    $.ui.toast(`mm: new session in ${w.label ?? w.name}…`)
+    await $.command.run({ command: 'clear' })
+    const isThere = (root: string) => root === w.path || root === stat.realPath
+    if (!isThere(await $.session.root())) {
+      await $.command.run({ command: 'cd', args: w.path })
+      // Started over once more inside: the session the move carried along has
+      // neither the folder's CLAUDE.md nor its SessionStart hooks' context.
+      if (isThere(await $.session.root())) await $.command.run({ command: 'clear' })
+    }
+    $.ui.invalidate('ui.render')
+  } catch (error) {
+    $.ui.toast(`mm failed: ${error instanceof Error ? error.message : error}`)
+  } finally {
+    isSelecting = false
+  }
 }
 
 /** `mmhub start --json`, from the last snapshot's paths when there is one. */
@@ -431,6 +466,7 @@ export async function renderPane($: EngineInterface, e: RenderInput<'Pane'>) {
 
   const snap = v.snapshot
   const { mattermost: mm, caps } = snap
+  const root = await $.session.root()
 
   const header = (
     <Box flexDirection="column">
@@ -581,16 +617,15 @@ export async function renderPane($: EngineInterface, e: RenderInput<'Pane'>) {
             {provider.rest ? <Text dimColor>{` · ${provider.rest}`}</Text> : null}
           </Text>
         ) : null}
-        <Box flexDirection="row">
+        <Box flexDirection="row" flexWrap="wrap" columnGap={1}>
           <Button
-            key={`new:${w.name}`}
-            label="New session"
-            dimColor
-            onPress={async () => {
-              await newSession($, snap, w.name)
-              await poll($)
+            key={`select:${w.name}`}
+            label={w.path === root ? 'New session' : 'Select'}
+            onPress={press => {
+              void selectWorkspace($, w, press.surface)
             }}
           />
+          {w.path === root ? <Text color="success">✓ selected</Text> : null}
         </Box>
         {live.length === 0 ? <Text dimColor>No live sessions.</Text> : null}
         {live.map(s => sessionRow(s, false, w.provider?.active))}

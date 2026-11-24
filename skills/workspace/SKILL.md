@@ -51,8 +51,9 @@ Arguments passed: `$ARGUMENTS`
 ## Dispatch (empty → list)
 
 - **list**: `mmhub ws list`, plus `mmhub status` for live sessions.
-- **To work in a workspace yourself**: `mmhub session new <workspace>` (or **New session** on the
-  workspace in the `/mm` panel) opens a direct session in the workspace folder, which works on
+- **To work in a workspace yourself**: **Select** on the workspace in the `/mm` panel replaces the
+  Claude Code session open in the terminal with a new one in the workspace folder. Or
+  `mmhub session new <workspace>` opens a direct session there in the hub's tmux, which works on
   the repos where they are; attach with the `tmux -L mmhub attach -t mmw-…` command it prints.
   Routers don't hand it tasks.
 - **`create <name> [description]`**: `mmhub ws create <name> <description>` (copies the

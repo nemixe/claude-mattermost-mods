@@ -24,8 +24,8 @@ the official Telegram channel plugin does, but with many sessions:
   opens a thread and gives the workspace's router the instruction, so recurring work
   runs without anyone posting (see [Scheduled jobs](#scheduled-jobs)).
 - **A panel in Claude Code** (`/mm`) listing workspaces and their live and stopped
-  sessions, with Stop / Wake / Restart / Pin / Copy attach, and **New session** to open
-  a session in a workspace's folder that you work with yourself.
+  sessions, with Stop / Wake / Restart / Pin / Copy attach, and **Select** to replace the
+  Claude Code session you have open with a new one in a workspace's folder.
 
 Every session is a real interactive `claude` in tmux: `tmux -L mmhub attach -t mmw-<id>`.
 
@@ -598,14 +598,15 @@ inside the hub's tmux (`tmux -L mmhub new-session -s mmhub-login claude`, then
 | extra dirs | repos outside the workspace | `knowledge/`, `inbox/` | repos outside the workspace |
 | always | `--mcp-config` (bridge `mmhub` + workspace `.mcp.json`) `--strict-mcp-config`, generated `--settings` (hooks + workspace settings), `--setting-sources project,local`, `--append-system-prompt-file`, `--dangerously-load-development-channels server:mmhub` | same | same |
 
-**Direct sessions.** The panel's **New session** on a workspace (or `mmhub session new
-<ws>`) opens a session for you to work with yourself: a worker (`w-<id>`, titled
-`Direct session N`) that runs in the workspace folder itself and works on the repos where
-they are, not in worktrees. It starts right away; attach with the row's **Copy attach**
-(`tmux -L mmhub attach -t mmw-<id>`), which the answer also shows. No thread is tied to
-it: its permission prompts are answered in its terminal, routers don't see it or hand it
-tasks, and its hub tools read the workspace's channels but post nothing. It counts toward `maxLiveWorkers` and closes when idle like any worker, unless
-pinned or attached, and **Wake** resumes it with its conversation.
+**Direct sessions.** `mmhub session new <ws>` opens a session in the hub's tmux for you to
+work with yourself: a worker (`w-<id>`, titled `Direct session N`) that runs in the
+workspace folder itself and works on the repos where they are, not in worktrees. It starts
+right away; attach with the panel row's **Copy attach** (`tmux -L mmhub attach -t mmw-<id>`),
+which the answer also shows. No thread is tied to it: its permission prompts are answered in
+its terminal, routers don't see it or hand it tasks, and its hub tools read the workspace's
+channels but post nothing. It counts toward `maxLiveWorkers` and closes when idle like any
+worker, unless pinned or attached, and **Wake** resumes it with its conversation. (To switch
+the Claude Code session you already have open instead, use **Select** in the panel.)
 
 User-level plugins and settings don't load in spawned sessions (`--setting-sources
 project,local`), so another channel plugin can't grab them. Spike findings behind these

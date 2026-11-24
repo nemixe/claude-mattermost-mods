@@ -134,6 +134,13 @@ type World = {
   copies: { text: string; surface?: string }[]
   opened: string[]
   viewWrites: number
+  /** The session's project root, moved by /cd. */
+  root: string
+  /** Slash commands the session offers, and those it ran. */
+  offered: string[]
+  commands: string[]
+  /** The person answers no when /cd asks about the folder. */
+  declines: boolean
 }
 
 /** The engine and the hub beneath the plugin. */
@@ -147,6 +154,10 @@ function world(on: On, file: string | undefined): World {
     copies: [],
     opened: [],
     viewWrites: 0,
+    root: '/home/tester',
+    offered: ['clear', 'cd'],
+    commands: [],
+    declines: false,
   }
   mock.env(on, { HOME: '/home/tester', MMHUB_STATE_DIR: '/state/mmhub/' })
   on('session.start', (_, e) => ({ cwd: e.cwd }))
@@ -175,6 +186,23 @@ function world(on: On, file: string | undefined): World {
       },
     }
   })
+  on('fs.stat', (_, e) => {
+    if (!e.path.startsWith('/work/')) throw new Error(`ENOENT: ${e.path}`)
+    return { value: { kind: 'dir', size: 0, mtimeMs: 0, isLink: false, realPath: e.path } }
+  })
+  on('session.root', () => ({ value: w.root }))
+  on('command.list', () => ({
+    value: w.offered.map(name => ({ name, description: '', source: 'builtin' as const })),
+  }))
+  on('command.run', { command: 'clear' }, () => {
+    w.commands.push('/clear')
+    return { text: '' }
+  })
+  on('command.run', { command: 'cd' }, (_, e) => {
+    w.commands.push(`/cd ${e.args}`)
+    if (!w.declines) w.root = e.args
+    return { text: '' }
+  })
   on('ui.toast', (_, e) => {
     w.toasts.push(e.text)
     return { value: undefined }
@@ -197,6 +225,11 @@ function world(on: On, file: string | undefined): World {
 
 const start = ($: Engine) =>
   $.session.start({ cwd: '/work/acme', surface: 'terminal', isInteractive: true })
+
+/** Select runs on after the press. */
+async function settled(w: World): Promise<void> {
+  await w.clock.advance(100)
+}
 
 for (const surface of ['terminal', 'desktop'] as const) {
   describe(surface, () => {
@@ -255,15 +288,61 @@ for (const surface of ['terminal', 'desktop'] as const) {
       await ui.unmount()
     })
 
-    test('New session opens a direct session in the workspace', async ($, on) => {
+    test('Select replaces the open session with a new one in the workspace folder', async ($, on) => {
       const w = world(on, JSON.stringify(fixture()))
       await start($)
       const ui = await $.ui.mount({ ...PANE, surface })
 
-      expect((await ui.find({ key: 'new:acme' }))?.props.label).toBe('New session')
-      await ui.press({ key: 'new:acme' })
-      expect(w.runs).toEqual([[BUN, CLI, 'session', 'new', 'acme', '--json']])
-      expect(w.toasts.at(-1)).toBe('mm: new acme ok')
+      expect((await ui.find({ key: 'select:acme' }))?.props.label).toBe('Select')
+      expect(await ui.find({ type: 'Text', text: '✓ selected' })).toBeUndefined()
+      await ui.press({ key: 'select:acme' })
+      await settled(w)
+      // The old conversation ends first, so it isn't moved along; the second
+      // /clear starts the session inside, with the folder's CLAUDE.md and hooks.
+      expect(w.commands).toEqual(['/clear', '/cd /work/acme', '/clear'])
+      expect(w.toasts).toEqual(['mm: new session in acme…'])
+      expect(w.runs).toEqual([]) // nothing is started in the hub
+
+      // Now here: marked, and the button starts over in place.
+      expect(await ui.find({ type: 'Text', text: '✓ selected' })).toBeDefined()
+      expect((await ui.find({ key: 'select:acme' }))?.props.label).toBe('New session')
+      await ui.press({ key: 'select:acme' })
+      await settled(w)
+      expect(w.commands).toEqual(['/clear', '/cd /work/acme', '/clear', '/clear'])
+      await ui.unmount()
+    })
+
+    test("a folder the person declines is not entered, and Select works again", async ($, on) => {
+      const w = world(on, JSON.stringify(fixture()))
+      w.declines = true
+      await start($)
+      const ui = await $.ui.mount({ ...PANE, surface })
+
+      await ui.press({ key: 'select:acme' })
+      await settled(w)
+      expect(w.commands).toEqual(['/clear', '/cd /work/acme'])
+      expect(await ui.find({ type: 'Text', text: '✓ selected' })).toBeUndefined()
+
+      w.declines = false
+      await ui.press({ key: 'select:acme' })
+      await settled(w)
+      expect(await ui.find({ type: 'Text', text: '✓ selected' })).toBeDefined()
+      await ui.unmount()
+    })
+
+    test('without /cd (the desktop app) Select leaves the session alone and copies the command', async ($, on) => {
+      const snap = fixture()
+      snap.workspaces[0]!.path = "/work/it's acme"
+      const w = world(on, JSON.stringify(snap))
+      w.offered = ['clear']
+      await start($)
+      const ui = await $.ui.mount({ ...PANE, surface })
+
+      await ui.press({ key: 'select:acme' })
+      await settled(w)
+      expect(w.commands).toEqual([])
+      expect(w.copies).toEqual([{ text: "cd '/work/it'\\''s acme' && claude", surface }])
+      expect(w.toasts.at(-1)).toMatch(/can't move a session to another folder\. Copied: cd /)
       await ui.unmount()
     })
 
@@ -278,9 +357,10 @@ for (const surface of ['terminal', 'desktop'] as const) {
 
       expect((await ui.find({ type: 'Text', text: /^▌@alice$/ }))?.props.color).toBe('claude')
       expect((await ui.find({ type: 'Text', text: /^ personal-u1abc$/ }))?.props.dimColor).toBe(true)
-      // The buttons still go by the workspace's name.
-      await ui.press({ key: 'new:personal-u1abc' })
-      expect(w.runs).toEqual([[BUN, CLI, 'session', 'new', 'personal-u1abc', '--json']])
+      // The buttons still go by the workspace's name; the toast says whose it is.
+      await ui.press({ key: 'select:personal-u1abc' })
+      await settled(w)
+      expect(w.toasts.at(-1)).toBe('mm: new session in @alice…')
       await ui.unmount()
     })
 
@@ -420,16 +500,21 @@ test('a malformed session key never reaches the CLI', async ($, on) => {
   await ui.unmount()
 })
 
-test('a malformed workspace name never reaches the CLI', async ($, on) => {
+test('Select never hands a malformed or missing folder to a command', async ($, on) => {
   const snap = fixture()
-  snap.workspaces[0]!.name = '--json'
+  snap.workspaces[0]!.path = '/work/acme\n/exit'
+  snap.workspaces.push({ ...snap.workspaces[0]!, name: 'gone', path: '/gone', sessions: [] })
   const w = world(on, JSON.stringify(snap))
   await start($)
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
 
-  await ui.press({ key: 'new:--json' })
-  expect(w.runs).toEqual([])
-  expect(w.toasts.at(-1)).toMatch(/refused a malformed workspace name/)
+  await ui.press({ key: 'select:acme' })
+  await settled(w)
+  expect(w.toasts.at(-1)).toBe('mm: refused a malformed workspace folder (acme)')
+  await ui.press({ key: 'select:gone' })
+  await settled(w)
+  expect(w.toasts.at(-1)).toBe('mm: no folder /gone on this machine')
+  expect(w.commands).toEqual([])
   await ui.unmount()
 })
 
