@@ -652,6 +652,17 @@ checks the transcript first and falls back to a fresh session (the router is tol
 re-read the thread). `mmhub stop` leaves sessions running; the next `mmhub start`
 adopts them.
 
+**Startup dialogs.** Nobody sits at a session's terminal, so the hub answers the dialogs
+Claude Code opens with: the development-channels warning, the trust question for the
+session's own folder, and "Adding a new directory", asked for each `--add-dir` folder
+that isn't trusted yet (its answer holds for that session, so it comes back at every
+start). Trust is stored by path: after `workspacesDir` moves, every workspace is
+untrusted again until a session starts in its folder. The hub only adds the folders that
+launch passed with `--add-dir` (a worker's `knowledge/` and `inbox/`, repos outside the
+workspace, any in `routerArgs`/`workerArgs`), compared by the full path on screen. Any
+other folder, and any dialog it doesn't know, is left alone: the start fails after 90 s
+with a ⚠️ post, and `hub.log` has the screen.
+
 **Unreadable files.** A workspace whose `workspace.json` is there but can't be read (an
 external disk macOS keeps the hub out of, wrong permissions, a disk error) is left
 alone: its file is never moved or written over, its sessions don't start, and running

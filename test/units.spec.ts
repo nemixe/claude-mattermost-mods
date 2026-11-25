@@ -8,7 +8,7 @@ import { AccessStore, classifySender, defaultAccess, isOwner, issuePairingCode, 
 import { buildDigest } from '../src/hub/digest'
 import { instructionsFor, toolsFor } from '../src/bridge/tools'
 import { PermissionDesk, promptText } from '../src/hub/permissions'
-import { buildSettings, claudeArgs, sessionFiles, shq, tmuxName, transcriptPath, type LaunchSpec } from '../src/hub/spawn'
+import { addedDirs, buildSettings, claudeArgs, sessionFiles, shq, tmuxName, transcriptPath, type LaunchSpec } from '../src/hub/spawn'
 import { Store } from '../src/hub/store'
 import { cleanEnv } from '../src/hub/tmux'
 
@@ -68,6 +68,11 @@ describe('launch argv', () => {
     expect(a).not.toContain('--tools')
     expect(a).not.toContain('dontAsk')
     expect(a.slice(-2)).toEqual(['--dangerously-load-development-channels', 'server:mmhub'])
+  })
+  test('the folders an argv adds: the hub\'s own, and any in routerArgs/workerArgs', () => {
+    const a = claudeArgs({ ...base, role: 'worker', addDirs: ['/ws/knowledge', '/ws/in box'], extraArgs: ['--add-dir', '/a', 'b', '--add-dir=/c', '--effort', 'low'] })
+    expect(addedDirs(a, '/cwd')).toEqual(['/ws/knowledge', '/ws/in box', '/a', '/cwd/b', '/c'])
+    expect(addedDirs(claudeArgs({ ...base, role: 'router', addDirs: [], extraArgs: [] }), '/cwd')).toEqual([])
   })
   test('names and paths', () => {
     expect(tmuxName('w-ab12')).toBe('mmw-ab12')

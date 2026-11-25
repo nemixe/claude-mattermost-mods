@@ -64,7 +64,8 @@ class FakeTmux {
   /** What the pane shows (a startup banner, say); empty by default. */
   screen: (name: string) => string = () => ''
   async capture(n: string) { return this.screen(n) }
-  async keys() {}
+  pressed: string[] = []
+  async keys(_n: string, keys: string[]) { this.pressed.push(...keys) }
   async text(n: string, t: string) { if (t === '/exit') this.alive.delete(n) }
   async list() { return [...this.alive] }
   async clients() { return 0 }
@@ -169,6 +170,27 @@ async function hook(hub: Hub, key: string, event: 'Stop' | 'StopFailure' | 'Sess
   hub.liveOf(key).lastDeliveredAt = 0
   await hub.enqueue(() => hub.applyHook({ t: 'hook', key, event, ...extra }))
 }
+
+describe('a workspace folder Claude Code doesn\'t trust (it was moved, say)', () => {
+  const asks = (folder: string) => [' Adding a new directory:', '', ` ${folder}`, '', " This session hasn't worked here before.", '', ' ❯ No, exit', '   Yes, add it', '', ' Enter to confirm · Esc to cancel'].join('\n')
+
+  test('a worker that starts first gets its own folders added, and no other', async () => {
+    const { hub, tmux, w } = setup()
+    const { key } = worker(hub, w)
+    const folders = [join(w.dir, '..', 'other', 'knowledge'), join(w.dir, 'knowledge'), join(w.dir, 'inbox')]
+    let shown = 0
+    tmux.screen = () => (folders[shown] ? asks(folders[shown]!) : '')
+    expect(await hub.enqueue(() => hub.ensureStarted(key))).toBe('live')
+    await Bun.sleep(2500)
+    expect(tmux.pressed).toEqual([]) // another workspace's
+    for (shown = 1; shown < folders.length; shown++) {
+      tmux.pressed = []
+      await until(`an answer for ${folders[shown]}`, () => tmux.pressed.length === 2)
+      expect(tmux.pressed).toEqual(['Down', 'Enter'])
+    }
+    await connect(hub, tmux, key, 1)
+  }, T)
+})
 
 describe('a workspace the hub can\'t read', () => {
   /** As on a disk macOS keeps the hub out of; returns a way to let it in again. */

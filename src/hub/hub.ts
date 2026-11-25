@@ -36,8 +36,8 @@ import {
   providerChain, providerFault, readSecret, redact, resetTime, startupProblem, syncTranscript, unusableReason,
   type Choice, type FaultKind, type Health, type ProviderDef,
 } from './providers'
-import { claudeArgs, tmuxName, transcriptPath, wrapArgv, writeProviderEnv, writeSessionFiles } from './spawn'
-import { shepherd, waitForCalm } from './shepherd'
+import { addedDirs, claudeArgs, tmuxName, transcriptPath, wrapArgv, writeProviderEnv, writeSessionFiles } from './spawn'
+import { askedFolder, shepherd, waitForCalm } from './shepherd'
 import { buildSnapshot, StatusWriter } from './status'
 import { isDraft, Store, type MessageRow, type SessionRow, type TaskRow, type ThreadRow, type WorkerRow } from './store'
 import { Ticker } from './ticker'
@@ -740,6 +740,7 @@ export class Hub {
       files,
       autocompact: row.role === 'router' ? this.cfg.routerAutocompact : undefined,
     })
+    const folders = addedDirs(argv, row.cwd)
     // A provider's env (secrets included) goes through a 0600 file the launch sources and deletes — never argv.
     if (launch.kind !== DEFAULT_PROVIDER) argv = wrapArgv(argv, writeProviderEnv(files, launch.env))
     l.provider = choice.name
@@ -772,17 +773,19 @@ export class Hub {
       return false
     }
     log('lifecycle', `${key}: ${plan.mode === 'resume' ? 'resuming' : 'starting'} (${row.role}, ${model}, ${w.name}, provider ${choice.name}${choice.fallback ? ' — fallback' : ''})`)
-    void this.watchStartup(key, plan.mode === 'resume')
+    void this.watchStartup(key, plan.mode === 'resume', folders)
     return true
   }
 
-  private async watchStartup(key: string, resuming: boolean): Promise<void> {
+  /** `folders`: what the launch passed with --add-dir (the only ones the hub lets it add). */
+  private async watchStartup(key: string, resuming: boolean, folders: string[]): Promise<void> {
     const l = this.liveOf(key)
     const name = tmuxName(key)
     const since = l.spawnedAt
     // No "resuming…" post: "typing…" shows once the session runs (keepTyping).
     let outcome = await shepherd(this.tmux, name, () => l.helloAt >= since, {
-      onDialog: d => log('lifecycle', `${key}: answered startup dialog "${d.name}"`),
+      folders,
+      onDialog: d => log('lifecycle', `${key}: answered startup dialog "${d.name}"${d.folder ? ` (${d.folder})` : ''}`),
       problem: startupProblem,
     })
     let problem: ReturnType<typeof startupProblem>
@@ -804,6 +807,8 @@ export class Hub {
     }
     const screen = await this.tmux.capture(name)
     problem ??= startupProblem(screen)
+    const asked = askedFolder(screen)
+    if (asked) log('lifecycle', `${key}: it asks to add ${asked}; this launch passed ${folders.join(', ') || 'no folders'}`)
     log('lifecycle', `${key}: startup ${outcome}${problem ? ` (${problem.reason})` : ''}\n${redact(screen.split('\n').filter(Boolean).slice(-15).join('\n'))}`)
     await this.tmux.kill(name)
     await this.enqueue(async () => {

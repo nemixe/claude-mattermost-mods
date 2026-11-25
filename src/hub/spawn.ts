@@ -5,7 +5,7 @@
 
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
-import { join } from 'path'
+import { join, resolve } from 'path'
 import type { Paths } from '../shared/paths'
 import type { Role } from '../shared/ipc'
 import { peekJson } from '../shared/util'
@@ -179,6 +179,17 @@ export function claudeArgs(s: LaunchSpec): string[] {
     ...s.extraArgs,
     '--dangerously-load-development-channels', 'server:mmhub',
   ]
+}
+
+/** The folders an argv adds with --add-dir: the hub's own, and any in routerArgs/workerArgs. */
+export function addedDirs(argv: string[], cwd: string): string[] {
+  const dirs: string[] = []
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]!
+    if (a.startsWith('--add-dir=')) dirs.push(a.slice('--add-dir='.length))
+    else if (a === '--add-dir') while (argv[i + 1] !== undefined && !argv[i + 1]!.startsWith('-')) dirs.push(argv[++i]!) // it takes several
+  }
+  return dirs.filter(Boolean).map(d => resolve(cwd, d))
 }
 
 /** Claude Code's transcript for a session: ~/.claude/projects/<cwd with / and . → ->/<id>.jsonl */
