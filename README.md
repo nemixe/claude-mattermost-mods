@@ -343,8 +343,16 @@ bot when "talking to the bot" is at least `openrouter.threshold` (0.5) likely, a
 decides from `openrouter.ruleThreshold` (0.8), and a sure greeting or thanks from
 `openrouter.kindThreshold` (0.7). A chat model answers who the reply is talking to and
 whether a rule describes it; a "don't answer" rule wins, then an "answer" rule, then
-whether it talks to the bot. If OpenRouter fails or times out (`openrouter.timeoutMs`,
-10 s), the reply reaches the router.
+whether it talks to the bot.
+
+**When OpenRouter fails** (no key, no credit, an error, or no answer within
+`openrouter.timeoutMs`, 10 s), an @mention is what gets through: a reply without one
+doesn't reach the router, so an outage doesn't start a router for every reply in the
+threads it follows. Nothing is retried. The thread stays followed, replies are judged
+again as soon as OpenRouter answers, and the next message that does get through tells the
+router how many weren't judged (`fetch_thread` shows them). A thread of only the bot and
+one person isn't affected, since no model is asked there. `mmhub logs` has a line for each
+reply that wasn't judged, and `mmhub openrouter` says what is wrong.
 
 **What leaves the machine:** for each reply without a mention in a followed thread, its
 text, up to 10 posts before it, the usernames in the thread and the workspace's rules go

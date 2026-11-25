@@ -82,7 +82,10 @@ Arguments passed: `$ARGUMENTS`
   command line. `mmhub openrouter model <id>` picks the model (default
   `google/gemini-decision-1`, Google's decision model; `openai/gpt-6-luna-decisions` is
   OpenAI's; any OpenRouter chat model works too), and `mmhub openrouter` says whether
-  key and model work, with one test judgement.
+  key and model work, with one test judgement. While OpenRouter fails, only replies that
+  @mention the bot reach it (plus the one person's in a two-person thread); the router
+  hears afterwards how many weren't judged. If a user says the bot ignores replies in
+  such a workspace, run `mmhub openrouter` first.
 - **`trigger <workspace> [mention|mention-only|laya|openrouter|inherit]`**: which replies in the bot's threads
   reach it. `mention` (default): an @mention starts a thread, and every reply in it
   reaches the router, mentioned or not. `mention-only`: only posts that @mention the bot

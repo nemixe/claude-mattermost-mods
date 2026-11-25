@@ -119,7 +119,7 @@ export async function apiOf(cfg: Pick<OpenRouterConfig, 'url' | 'model' | 'timeo
 
 // ---------------------------------------------------------------- calls
 
-/** POST with the key; the JSON reply. Throws on any failure (the caller lets the reply through). */
+/** POST with the key; the JSON reply. Throws on any failure (the caller then lets only mentions through: trigger.ts). */
 async function post(cfg: OpenRouterCall, url: string, body: Record<string, unknown>, fetchFn: typeof fetch): Promise<unknown> {
   if (!cfg.apiKey) throw new Error(`OpenRouter: no ${OPENROUTER_KEY} in .env (mmhub openrouter key)`)
   const res = await fetchFn(url, {

@@ -52,7 +52,7 @@ describe('decision models (the default, google/gemini-decision-1)', () => {
     const low = fakeFetch(() => decisions({ hubbot: 0.4, nobody: 0.6 }))
     expect((await judgeOpenRouter({ ...cfg, api: 'decisions' }, thread, low.f)).yes).toBe(false)
   })
-  test('a refusal or an error throws (the hub then lets the reply through)', async () => {
+  test('a refusal or an error throws (the hub then lets only mentions through)', async () => {
     const refused = fakeFetch(() => Response.json({ answers: { who: { type: 'refusal' } } }))
     await expect(judgeOpenRouter({ ...cfg, api: 'decisions' }, thread, refused.f)).rejects.toThrow('the model declined to answer')
     const policy = fakeFetch(() => Response.json({ error: { message: 'No endpoints found matching your data policy' } }, { status: 404 }))
@@ -123,7 +123,7 @@ describe('judgeOpenRouter with a chat model', () => {
     expect(v.yes).toBe(true)
     expect(calls.length).toBe(0)
   })
-  test('no key, a refused key or an error throws (the hub then lets the reply through)', async () => {
+  test('no key, a refused key or an error throws (the hub then lets only mentions through)', async () => {
     const { f } = fakeFetch(() => Response.json({ error: { message: 'No auth credentials found', code: 401 } }, { status: 401 }))
     await expect(judgeOpenRouter({ ...chat, apiKey: undefined }, thread, f)).rejects.toThrow('no OPENROUTER_API_KEY')
     await expect(judgeOpenRouter(chat, thread, f)).rejects.toThrow('OpenRouter: HTTP 401: No auth credentials found')

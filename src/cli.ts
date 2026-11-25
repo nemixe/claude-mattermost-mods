@@ -481,7 +481,7 @@ async function ws(): Promise<never> {
       }
       if (after === 'openrouter') {
         const why = await openRouterReady(openRouterOf(cfg))
-        out(true, `workspace ${w.name}: the bot follows threads it is @mentioned in, and ${cfg.openrouter.model} (through OpenRouter) decides which replies without a mention reach it until the router unfollows${made}. Each such reply sends the thread's last ${cfg.openrouter.messages} posts and the names in it to OpenRouter${cfg.openrouter.dataCollection === 'deny' ? ' (only to providers that keep no prompts)' : ''}${why ? `. ⚠️ not working yet: ${why} (until it is, every reply in a followed thread reaches the router)` : ''}`)
+        out(true, `workspace ${w.name}: the bot follows threads it is @mentioned in, and ${cfg.openrouter.model} (through OpenRouter) decides which replies without a mention reach it until the router unfollows${made}. Each such reply sends the thread's last ${cfg.openrouter.messages} posts and the names in it to OpenRouter${cfg.openrouter.dataCollection === 'deny' ? ' (only to providers that keep no prompts)' : ''}. While OpenRouter fails, only replies that @mention the bot reach it${why ? `. ⚠️ not working yet: ${why}` : ''}`)
       }
       const why = await layaReady(layaOf(cfg.laya))
       out(true, `workspace ${w.name}: the bot follows threads it is @mentioned in, and Laya decides which replies without a mention reach it until the router unfollows${made}${why ? `. ⚠️ not working yet: ${why} (until it is, every reply in a followed thread reaches the router)` : ''}`)

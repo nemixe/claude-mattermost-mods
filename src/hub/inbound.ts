@@ -50,7 +50,7 @@ export type InboundAction =
   /**
    * A reply without a mention in a followed hub thread (trigger "laya"): ask Laya
    * whether it is meant for the bot. Yes, or Laya can't answer → `then` (the
-   * router gets it, as without Laya); no → it is passed over.
+   * router gets it, as without Laya); no, or OpenRouter can't answer → it is passed over.
    */
   | { kind: 'classify'; threadId: string; then: Extract<InboundAction, { kind: 'message' }> }
 

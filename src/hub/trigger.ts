@@ -11,6 +11,11 @@
  * the chain. Posts of one thread are judged and acted on in the order they came. In
  * a thread that isn't followed, replies without a mention are ignored. DMs never go
  * to Laya: every DM reaches the bot.
+ *
+ * A judge that fails: without Laya (local), replies reach the router as if it weren't
+ * there. Without OpenRouter, which can stay down or out of credit for long, they don't
+ * (each would start or resume the router): only a mention does. The router hears how
+ * many it missed with the next message that reaches it.
  */
 
 import { errMsg, log, readEnvFile } from '../shared/util'
@@ -37,6 +42,7 @@ export function classifyLater(hub: Hub, a: Classify, post: MMPost, channelType: 
     const v = await verdict(hub, a, post)
     await hub.enqueue(() => {
       if (v === true) return hub.act(a.then, post, channelType)
+      if (v === 'unjudged') return addOne(hub, `unjudged:${a.threadId}`)
       if (typeof v === 'number') unfollowQuiet(hub, a.threadId, v)
       passOver(hub, a)
     })
@@ -51,14 +57,14 @@ export function classifyLater(hub: Hub, a: Classify, post: MMPost, channelType: 
 /**
  * true: the post is for the bot. false: it isn't. A number: that many posts went by
  * since the bot last posted (hub.cfg.unfollowAfter or more), so the hub stops
- * following the thread and the post isn't judged.
+ * following the thread and the post isn't judged. 'unjudged': OpenRouter failed.
  */
-async function verdict(hub: Hub, a: Classify, post: MMPost): Promise<boolean | number> {
+async function verdict(hub: Hub, a: Classify, post: MMPost): Promise<boolean | number | 'unjudged'> {
   const wsName = hub.store.thread(a.threadId)?.workspace ?? loadBindings(hub.p.bindings)[post.channel_id]
   const w = wsName ? hub.ws(wsName) : undefined
   if (!w) return true
   const viaOpenRouter = effective(hub.cfg, w).trigger === 'openrouter'
-  const who = viaOpenRouter ? 'OpenRouter' : 'Laya'
+  let asked = false
   try {
     const { earlier, people, gap } = await thread(hub, post, viaOpenRouter ? hub.cfg.openrouter.messages : hub.cfg.laya.messages)
     if (hub.cfg.unfollowAfter > 0 && gap >= hub.cfg.unfollowAfter) return gap
@@ -70,13 +76,18 @@ async function verdict(hub: Hub, a: Classify, post: MMPost): Promise<boolean | n
       people,
       mentioned: await mentioned(hub, post.message),
     }
+    asked = true
     const v = viaOpenRouter ? await judgeOpenRouter(openRouterCall(hub), o) : await judge(layaCall(hub), o)
     log('trigger', `${post.id} (${w.name}${viaOpenRouter ? `, ${hub.cfg.openrouter.model}` : ''}): ${v.p.toFixed(2)} by ${v.why} → ${v.yes ? 'to the router' : 'not for the bot'}`)
     return v.yes
   } catch (err) {
+    if (asked && viaOpenRouter) {
+      log('trigger', `${post.id} (${w.name}, ${hub.cfg.openrouter.model}): not judged, OpenRouter failed (${errMsg(err)}) → not to the router (an @mention gets through)`)
+      return 'unjudged'
+    }
     if (Date.now() - lastWarnAt > 60_000) {
       lastWarnAt = Date.now()
-      log('trigger', `${who} failed (${errMsg(err)}): until it answers, replies in followed threads go to their router`)
+      log('trigger', `${asked ? 'Laya failed' : "couldn't ask the judge"} (${errMsg(err)}): until that works, replies in followed threads go to their router`)
     }
     return true
   }
@@ -106,7 +117,10 @@ function unfollowQuiet(hub: Hub, threadId: string, gap: number): void {
 
 /** One more reply in this hub thread its router didn't get (Laya said no, or it lacked a mention under mention-only). */
 export function countSkipped(hub: Pick<Hub, 'store'>, threadId: string): void {
-  const k = `skipped:${threadId}`
+  addOne(hub, `skipped:${threadId}`)
+}
+
+function addOne(hub: Pick<Hub, 'store'>, k: string): void {
   hub.store.set(k, String(Number(hub.store.get(k) ?? 0) + 1))
 }
 
@@ -185,8 +199,20 @@ async function mentioned(hub: Hub, text: string): Promise<Person[]> {
   return out
 }
 
-/** "(N messages … not for you)" for a router, once; empty when there were none. */
+/** What a router is told, once, about the messages it didn't get; empty when there were none. */
 export function takeSkipped(hub: Hub, threadId: string, trigger?: Trigger): string {
+  return [takeUnjudged(hub, threadId), takePassedOver(hub, threadId, trigger)].filter(Boolean).join('\n\n')
+}
+
+function takeUnjudged(hub: Hub, threadId: string): string {
+  const k = `unjudged:${threadId}`
+  const n = Number(hub.store.get(k) ?? 0)
+  if (!n) return ''
+  hub.store.del(k)
+  return `(${n} earlier message(s) in this thread without an @mention didn't reach you, because the model that judges them couldn't be reached. Some may be for you: fetch_thread shows them.)`
+}
+
+function takePassedOver(hub: Hub, threadId: string, trigger?: Trigger): string {
   const k = `skipped:${threadId}`
   const n = Number(hub.store.get(k) ?? 0)
   const unfollowed = hub.store.get(`unfollowed:${threadId}`)

@@ -1199,7 +1199,7 @@ describe('trigger mention-only', () => {
 })
 
 describe('trigger openrouter', () => {
-  test('a hosted decision model judges replies in followed threads, with the key from .env; when it fails, replies get through', async () => {
+  test('a hosted decision model judges replies in followed threads, with the key from .env; when it fails, only mentions get through', async () => {
     let toBot = 0.1
     let down = false
     const listings: string[] = []
@@ -1251,13 +1251,60 @@ describe('trigger openrouter', () => {
       // The model's API was looked up once.
       expect(listings.length).toBe(1)
 
-      // OpenRouter down: the reply reaches the router rather than being lost.
+      // OpenRouter down: no reply reaches the router (nor starts it) without a mention.
       down = true
+      await hook(hub, rkey, 'Stop')
+      await hub.enqueue(() => hub.close(rkey, 'idle'))
       await send('M3', 'and the tests?')
-      await until('M3 reaches the router', () => rb.got.length === 2)
+      await send('M4', 'anyone?')
+      await until('M3 and M4 not judged', () => hub.store.get('unjudged:T3') === '2')
+      expect(hub.store.session(rkey)!.status).toBe('stopped')
+      expect(tmux.launches.length).toBe(1)
+      expect(hub.queued(rkey)).toBe(0)
+      expect(hub.hookContext(rkey)).toContain("While the model can't be reached, only @mentions do")
+
+      // A mention gets through, and tells the router about them, once.
+      await send('M5', '@hubbot and the tests?')
+      const again = await connect(hub, tmux, rkey, 2)
+      await until('M5 reaches the router', () => again.got.length === 1)
+      expect(again.got[0]!.content).toContain("2 earlier message(s) in this thread without an @mention didn't reach you, because the model that judges them couldn't be reached")
+      expect(again.got[0]!.content).not.toContain('judged not meant for you')
+
+      // It answers again: judged as before, the thread still followed.
+      down = false
+      await send('M6', 'is the build green now?')
+      await until('M6 reaches the router', () => again.got.length === 2)
+      expect(again.got[1]!.content).not.toContain("couldn't be reached")
     } finally {
       or.stop(true)
     }
+  }, T)
+
+  test('while it fails, a thread of only the bot and one person goes on; what isn\'t OpenRouter\'s failure still reaches the router', async () => {
+    const { hub, tmux, w, p, others } = setup({ openrouter: { url: 'http://127.0.0.1:9/api/v1', timeoutMs: 500 } }, dir => {
+      writeFileSync(join(dir, 'access.json'), JSON.stringify({ dmPolicy: 'allowlist', allowFrom: ['U1'], channels: {}, pending: {} }))
+    })
+    hub.bot = { id: 'BOT', username: 'hubbot' }
+    setWorkspaceTrigger(loadConfig(p.config), 'demo', 'openrouter')
+    bindChannel(p.bindings, 'C1', 'demo')
+    const rkey = hub.createRouter({ threadId: 'T3', channelId: 'C1', workspace: w, label: 'thread three' })
+    others.push({ id: 'T3', root_id: '', user_id: 'U1', channel_id: 'C1', message: '@hubbot hi', create_at: 0 } as MMPost)
+    const send = (id: string, message: string) => hub.enqueue(() => hub.onPosted({ id, root_id: 'T3', user_id: 'U1', channel_id: 'C1', message, create_at: Date.now() } as MMPost, 'O'))
+    await send('M1', 'and the tests?')
+    const rb = await connect(hub, tmux, rkey, 1)
+    await until('M1 reaches the router', () => rb.got.length === 1)
+
+    // A third person: no key, so it can't be judged.
+    others.push({ id: 'B1', root_id: 'T3', user_id: 'U2', channel_id: 'C1', message: 'me too', create_at: 1 } as MMPost)
+    await send('M2', 'what about you?')
+    await until('M2 not judged', () => hub.store.get('unjudged:T3') === '1')
+    expect(rb.got.length).toBe(1)
+
+    // Mattermost fails to show the thread: OpenRouter was never asked.
+    const mm = hub.mm as unknown as { getThread: () => Promise<unknown> }
+    mm.getThread = async () => { throw new Error('502') }
+    await send('M3', 'hello?')
+    await until('M3 reaches the router', () => rb.got.length === 2)
   }, T)
 })
 
