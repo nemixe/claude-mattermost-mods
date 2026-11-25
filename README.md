@@ -111,8 +111,9 @@ the `/mm` panel. The CLI is `bun ~/claude-mattermost-mods/bin/mmhub` (alias it t
   reach it only right after its own post.
 - While a router or worker is working for a thread, the bot shows as **typing…** there:
   while the session runs, and while work it left running in the background goes on (a
-  command run in the background, an async agent, a Monitor watch: its turn ended, the
-  work didn't). Not while it starts up, while Laya or OpenRouter judges a reply, or while
+  command run in the background, an async agent, a Monitor watch, a
+  [Code Mode](#code-mode) script or the calls it didn't await: its turn ended, the work
+  didn't). Not while it starts up, while Laya or OpenRouter judges a reply, or while
   it waits for a 🔐 answer or an API-error retry. The hub reads that work from the
   session's transcript; when it ends, the turn Claude Code starts for it shows as
   typing too. Meanwhile the session isn't closed for being idle, cleaned up or evicted
@@ -621,6 +622,24 @@ the Claude Code session you already have open instead, use **Select** in the pan
 User-level plugins and settings don't load in spawned sessions (`--setting-sources
 project,local`), so another channel plugin can't grab them. Spike findings behind these
 choices: [docs/SPIKE.md](docs/SPIKE.md).
+
+### Code Mode
+
+Workers can run in Claude Code's experimental
+[Code Mode](https://code.claude.com/docs/en/code-mode): set
+`"env": {"CLAUDE_CODE_EXPERIMENTAL_CODE_MODE": "1"}` in a workspace's
+`.claude/settings.json` (the hub passes that file to its sessions as `--settings`). The
+hub follows the scripts a worker leaves running, and the commands a script didn't await,
+like its other background work. Before you turn it on:
+
+- Claude Code asks once per login (config dir) whether to turn it on, and the hub doesn't
+  answer for you: run `claude` there once with the variable set, and confirm.
+- A Code Mode session resumes only with Code Mode on. Take the variable out again, or
+  fall back to a provider Code Mode doesn't work on (an `api-key` one, a gateway),
+  and the worker starts over without its conversation.
+- Scripts run in the background only in `auto` or `bypassPermissions`; in other
+  `workerPermissionMode`s each one is waited for.
+- Routers stay out of it: their `--tools` list leaves the REPL out.
 
 ## Lifecycle
 

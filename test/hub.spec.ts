@@ -419,6 +419,44 @@ describe('background work', () => {
     expect(hub.restartPending(key)).toBe(false)
     expect(hub.backgroundOf(key)).toEqual([]) // the new process starts with none
   }, T)
+
+  test("Code Mode: a script and a command it didn't await hold off the idle close; its event, while idle, runs a turn", async () => {
+    const { hub, w, tmux } = setup()
+    const { key } = worker(hub, w)
+    await hub.enqueue(() => hub.ensureStarted(key))
+    await connect(hub, tmux, key, 1)
+    const row = hub.store.session(key)!
+    const tp = transcriptPath(row.cwd, row.sessionId)
+    mkdirSync(dirname(tp), { recursive: true })
+    const add = (o: Record<string, unknown>) => writeFileSync(tp, `${JSON.stringify({ timestamp: new Date(Date.now() + 5).toISOString(), ...o })}\n`, { flag: 'a' })
+    const result = (r: Record<string, unknown>) => add({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'x' }] }, toolUseResult: { code: 'x', stdout: '', stderr: '', ...r } })
+    const ev = (status: string, body: string) => `<event nonce="n" kind="repl-eval" at="2026-11-25T10:00:00.000Z" eval="1" status="${status}">\n${body}\n</event>`
+    result({ result: '(dispatched #1)', evalId: 1, asyncDispatched: true })
+    await hook(hub, key, 'Stop')
+    const idleLong = async () => {
+      hub.store.patchSession(key, { lastActiveAt: Date.now() - 48 * 3_600_000 })
+      await hub.enqueue(() => hub.reap())
+      return hub.store.session(key)!.status
+    }
+    expect(await idleLong()).toBe('idle') // not closed: the script runs on
+    hub.store.patchSession(key, { lastActiveAt: Date.now() })
+    await Bun.sleep(10)
+
+    // It ends with a command still running, and Claude Code starts a turn with its event.
+    const settled = ev('settled', '<log>[stderr] ⚠ 1 tool call(s) still running at script end (Bash) — they run on</log>')
+    add({ type: 'queue-operation', operation: 'enqueue', content: settled.replace(' nonce="n"', '') })
+    add({ type: 'attachment', attachment: { type: 'poll_events', envelopes: [settled], kinds: ['repl-eval'], remainingWakeCount: 0 } })
+    await Bun.sleep(10)
+    hub.keepTyping()
+    await hub.enqueue(async () => {})
+    expect(hub.store.session(key)!.status).toBe('busy')
+    expect(hub.backgroundOf(key).map(t => t.id)).toEqual(['calls:1'])
+    await hook(hub, key, 'Stop')
+    expect(await idleLong()).toBe('idle') // not closed: the command runs on
+    add({ type: 'queue-operation', operation: 'enqueue', content: ev('late', '<log>The tool calls that this script left running have ended. Completed since it returned: Bash.</log>').replace(' nonce="n"', '') })
+    expect(hub.backgroundOf(key)).toEqual([])
+    expect(await idleLong()).not.toBe('idle')
+  }, T)
 })
 
 /** A Stop hook the way the hub's socket answers it: the turn is sent back, or it ends. */
