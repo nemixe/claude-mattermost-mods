@@ -100,8 +100,8 @@ export type HubConfig = {
   trigger: Trigger
   /**
    * Triggers "laya" and "openrouter": the hub stops following a thread by itself once
-   * this many posts went by since the bot's last post there (0: never). A mention
-   * follows it again.
+   * this many posts went by since the bot's last post there. A mention follows it
+   * again. 0 (default): never, the router alone decides, after each reply.
    */
   unfollowAfter: number
   /** Where Laya runs and how it decides (laya.ts DEFAULT_LAYA). */
@@ -130,7 +130,7 @@ export const DEFAULT_CONFIG: HubConfig = {
   disablePlugins: [],
   tmuxSocket: 'mmhub',
   trigger: 'mention',
-  unfollowAfter: 15,
+  unfollowAfter: 0,
   laya: DEFAULT_LAYA,
   openrouter: DEFAULT_OPENROUTER,
 }

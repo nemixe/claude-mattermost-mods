@@ -195,14 +195,16 @@ on, the bot **follows** each thread it is @mentioned in:
 - **While followed,** each reply without a mention goes to Laya, and reaches the router
   only when Laya judges it meant for the bot. The next message that does get through
   tells the router how many it didn't get (`fetch_thread` shows them).
-- **Done → unfollowed.** When the request is done (the result is posted, and nothing waits
-  on the person or a worker), the router calls `unfollow`. The hub refuses that while a
-  worker still has work for the thread. From then on, replies without a mention are
-  ignored, without asking Laya.
-- **Quiet → unfollowed.** The hub also stops following a thread by itself once
-  `unfollowAfter` (15) posts went by since the bot's last post there, counting the new
-  one: people have moved on. That post isn't judged, and later ones without a mention
-  are ignored. `0` turns this off. It applies to `openrouter` too.
+- **Done → unfollowed.** The router decides. After each reply it sends, the hub asks it
+  whether to keep following: when the request is done (the result is posted, and nothing
+  waits on the person or a worker), it calls `unfollow`. The hub doesn't ask while a worker
+  still has work for the thread, and refuses `unfollow` then. From then on, replies without
+  a mention are ignored, without asking Laya.
+- **Quiet → still followed.** However many posts go by without one from the bot, they go on
+  to Laya. Set `unfollowAfter` in `config.json` to have the hub also stop following by
+  itself once that many posts went by since the bot's last one there, counting the new one
+  (it isn't judged, and later ones without a mention are ignored). It applies to
+  `openrouter` too. The default, `0`, leaves it to the router.
 - **A new mention follows the thread again.** The router hears how many messages it
   missed while it wasn't following, and why it stopped. Owners can also switch by hand with
   `!unfollow` and `!follow` in the thread.
@@ -540,8 +542,9 @@ itself, see [Lifecycle](#lifecycle); 0 = never), `busyWatchdogMinutes` (30), `ro
 `gitBin`, `path`, `tmuxSocket` (`mmhub`), `providers` (`["default"]`),
 `providerCooldownMinutes` (`{auth:60, quota:60, rate_limit:10, errors:15, channels:360}`),
 `trigger` (`mention`; or `mention-only`, `laya`, `openrouter`, see [above](#answering-without-a-mention-laya)),
-`unfollowAfter` (15: with `laya` or `openrouter`, stop following a thread after this many
-posts without one from the bot; 0 = never), `openrouter` ([above](#a-hosted-judge-openrouter)), `laya`
+`unfollowAfter` (0: only the router decides to stop following a thread; with `laya` or
+`openrouter`, a number makes the hub stop by itself after this many posts without one from
+the bot), `openrouter` ([above](#a-hosted-judge-openrouter)), `laya`
 (`{url: "http://127.0.0.1:11434", model: "laya", threshold: 0.45, ruleThreshold: 0.85, kindThreshold: 0.7, timeoutMs: 5000, messages: 10}`).
 A workspace's `workspace.json` can override models, permission mode, idle minutes and
 `providers` and `trigger`, and sets which workspaces may ask it (`acceptFrom`,

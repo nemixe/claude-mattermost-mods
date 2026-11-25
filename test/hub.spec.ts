@@ -1195,7 +1195,76 @@ describe('trigger openrouter', () => {
   }, T)
 })
 
-describe('unfollowing a quiet thread', () => {
+describe('deciding to unfollow', () => {
+  test('the router decides after each reply, where there is something to decide', async () => {
+    const { hub, p, w } = setup({}, owner => writeFileSync(join(owner, 'access.json'), JSON.stringify({ dmPolicy: 'allowlist', allowFrom: ['U1'], channels: {}, pending: {} })))
+    const rkey = hub.createRouter({ threadId: 'T3', channelId: 'C1', workspace: w, label: 'thread three' })
+    const reply = (text = 'done') => handleCall(hub, rkey, 'reply', { text })
+    const ask = 'Now decide whether to keep following this thread'
+    // No judge: every reply in the thread reaches it, so there is nothing to follow.
+    expect(await reply()).not.toContain(ask)
+    setWorkspaceTrigger(loadConfig(p.config), 'demo', 'mention-only')
+    expect(await reply()).not.toContain(ask)
+
+    for (const trigger of ['laya', 'openrouter'] as const) {
+      setWorkspaceTrigger(loadConfig(p.config), 'demo', trigger)
+      const res = await reply()
+      expect(res).toMatch(/^sent \(id: \S+\)\. Now decide/)
+      expect(res).toContain('call unfollow')
+    }
+
+    // A worker still has work for the thread: unfollow would be refused, so it isn't asked.
+    const task = hub.store.insertTask({ workerKey: 'w-busy', threadId: 'T3', channelId: 'C1', text: 'x', state: 'queued', createdAt: Date.now() })
+    expect(await reply('on it')).not.toContain(ask)
+    hub.store.setTaskState(task, 'ended')
+    expect(await reply()).toContain(ask)
+
+    // It decided: not asked again, until a mention follows the thread.
+    expect(await handleCall(hub, rkey, 'unfollow', {})).toContain('No longer following this thread')
+    expect(await reply('one more detail')).not.toContain(ask)
+    expect(hub.hookContext(rkey)).toContain('Whether to keep following is your decision, made after each reply you send')
+    expect(hub.hookContext(rkey)).not.toContain('The hub also stops following by itself')
+
+    // A DM is never judged, a worker doesn't follow.
+    hub.store.del('follow:T3')
+    hub.store.set('dm-channel:C1', '1')
+    expect(await reply()).not.toContain(ask)
+  }, T)
+
+  test('the hub leaves a quiet thread followed: a post after many without one from the bot is still judged, and reaches the router when it is for it', async () => {
+    let judgedPosts = 0
+    const laya = Bun.serve({
+      port: 0,
+      async fetch() {
+        judgedPosts++
+        return Response.json({ answers: { who: { type: 'choice', probabilities: { hubbot: 0.9, nobody: 0.1 } } } })
+      },
+    })
+    try {
+      const { hub, tmux, w, p, others } = setup({ laya: { url: `http://127.0.0.1:${laya.port}`, timeoutMs: 2000 } }, dir => {
+        writeFileSync(join(dir, 'access.json'), JSON.stringify({ dmPolicy: 'allowlist', allowFrom: ['U1'], channels: {}, pending: {} }))
+      })
+      hub.bot = { id: 'BOT', username: 'hubbot' }
+      setWorkspaceTrigger(loadConfig(p.config), 'demo', 'laya')
+      bindChannel(p.bindings, 'C1', 'demo')
+      const rkey = hub.createRouter({ threadId: 'T3', channelId: 'C1', workspace: w, label: 'thread three' })
+      others.push({ id: 'A0', root_id: 'T3', user_id: 'BOT', channel_id: 'C1', message: 'Done: the build is green.', create_at: 1 } as MMPost)
+      for (let i = 0; i < 40; i++) others.push({ id: `B${i}`, root_id: 'T3', user_id: i % 2 ? 'U1' : 'U2', channel_id: 'C1', message: `chat ${i}`, create_at: 2 + i } as MMPost)
+      const post = { id: 'M1', root_id: 'T3', user_id: 'U1', channel_id: 'C1', message: 'and is staging green too?', create_at: 100 } as MMPost
+      others.push(post)
+      await hub.enqueue(() => hub.onPosted(post, 'O'))
+      const rb = await connect(hub, tmux, rkey, 1)
+      await until('M1 reaches the router', () => rb.got.length === 1)
+      expect(rb.got[0]!.content).toContain('and is staging green too?')
+      expect(judgedPosts).toBe(1)
+      expect(hub.store.get('follow:T3')).toBeUndefined()
+    } finally {
+      laya.stop(true)
+    }
+  }, T)
+})
+
+describe('unfollowing a quiet thread (unfollowAfter set)', () => {
   test('after unfollowAfter posts without one from the bot, the hub stops following; a mention brings the bot back and says what it missed', async () => {
     let judged = 0
     const or = Bun.serve({

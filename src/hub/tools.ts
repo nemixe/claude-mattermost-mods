@@ -13,7 +13,7 @@ import { isLive } from './lifecycle'
 import { loadTrigger, MAX_RULES, RULE_MAX_CHARS, saveTrigger, triggerFile, usableRules } from './laya'
 import { listSchedulesTool, scheduleTool, unscheduleTool } from './jobs'
 import { answerRequest, forwardAnswer, linkedTo, listWorkspacesText, messageWorkspace, sendDM } from './links'
-import { inDM, setFollowing } from './trigger'
+import { following, inDM, setFollowing } from './trigger'
 import type { MMPost } from './mattermost'
 import { checkBotMentions } from './bots'
 import { newThread } from './newthread'
@@ -335,6 +335,18 @@ export async function queueTask(hub: Hub, key: string, thread: ThreadRow, text: 
   return { worker_id: key, task_id: taskId, state, ...(position > 1 ? { position } : {}) }
 }
 
+/**
+ * Added to a router's reply: whether to keep following its thread is its own decision,
+ * made now that it has answered. Empty where there is nothing to decide: no judge, a
+ * DM, not followed, or a worker still has work for the thread (unfollow is refused).
+ */
+function followChoice(hub: Hub, key: string): string {
+  const t = hub.store.threadByRouter(key) // a draft thread has its real id only now
+  const w = t ? hub.ws(t.workspace) : undefined
+  if (!t || !w || !judged(effective(hub.cfg, w).trigger) || inDM(hub, t.id) || !following(hub, t.id) || hub.store.openTasksIn(t.id).length) return ''
+  return '. Now decide whether to keep following this thread: if its request is done and you wait for nothing (an answer, a worker, another workspace), call unfollow. Otherwise go on; nothing to do.'
+}
+
 /** Run one tool call for session `key`. Returns the text shown to the model. */
 /** Tools that reach someone: a post, a reaction, a worker, another workspace, an owner, or leaving a thread. */
 const REACHES = new Set(['reply', 'react', 'edit_message', 'delegate', 'message_workspace', 'send_dm', 'answer_request', 'new_thread', 'unfollow'])
@@ -355,7 +367,8 @@ async function callTool(hub: Hub, key: string, tool: string, a: Args): Promise<s
         return "reported to the thread's router — it tells the person what matters. Their answers come back to you as new messages for this thread."
       }
       const ids = await postAs(hub, key, t, str(a, 'text')!, strList(a, 'files'))
-      return `sent (${ids.length > 1 ? `${ids.length} posts: ` : 'id: '}${ids.join(', ')})`
+      const sent = `sent (${ids.length > 1 ? `${ids.length} posts: ` : 'id: '}${ids.join(', ')})`
+      return role === 'router' ? sent + followChoice(hub, key) : sent
     }
     case 'react': {
       const post = await postInScope(hub, key, str(a, 'message_id')!)
