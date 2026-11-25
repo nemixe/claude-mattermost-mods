@@ -31,7 +31,7 @@ export type InboundInput = {
    * DMs ignore it: every DM reaches the bot.
    */
   trigger?: Trigger
-  /** The hub thread is followed: the bot was mentioned in it and its router hasn't called unfollow since. Default true. */
+  /** The hub thread is followed: the bot was mentioned in it and it wasn't unfollowed since. Default true. */
   followed?: boolean
 }
 

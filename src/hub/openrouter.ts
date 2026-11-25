@@ -2,7 +2,7 @@
  * Trigger "openrouter": like Laya (laya.ts), it judges the replies without an
  * @mention in hub threads the bot follows, but with a hosted model reached through
  * OpenRouter. Everything around the judgement is Laya's: following from a mention
- * until the router unfollows, the TRIGGER.md rules, the thread as Laya reads it
+ * until it is unfollowed, the TRIGGER.md rules, the thread as Laya reads it
  * (buildState) and the two-person shortcut.
  *
  * Two kinds of model:

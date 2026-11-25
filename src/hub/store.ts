@@ -486,11 +486,6 @@ export class Store {
     else this.db.query('UPDATE tasks SET state = ? WHERE id = ?').run(state, id)
   }
 
-  /** Work still open for a thread: queued, in progress, or waiting to be re-delivered. */
-  openTasksIn(threadId: string): TaskRow[] {
-    return (this.db.query("SELECT * FROM tasks WHERE thread_id = ? AND state IN ('queued', 'delivered', 'interrupted') ORDER BY id").all(threadId) as Raw[]).map(toTask)
-  }
-
   /** Tasks not yet finished, oldest first: interrupted ones (re-delivery) before queued ones. */
   pendingTasks(workerKey: string): TaskRow[] {
     return pendingOrder(this.tasksFor(workerKey, ['interrupted', 'queued']))

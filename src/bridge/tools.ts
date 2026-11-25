@@ -161,7 +161,7 @@ export function toolsFor(role: Role, reports: Reports = 'router', direct = false
       },
       {
         name: 'unfollow',
-        description: 'The request in your thread is done (the result is posted; nothing waits on the person or a worker): stop following the thread. Decide it after each reply. Where a judge decides (trigger "laya" or "openrouter"), messages without an @mention then stop reaching you; a mention follows the thread again. Refused while a worker still has work for the thread.',
+        description: 'Stop following your thread. Only when a person in it asks you to (to leave it, stop reading along, answer only when mentioned); never because a request is done. Where a judge decides (trigger "laya" or "openrouter"), messages without an @mention then stop reaching you; a mention follows the thread again.',
         inputSchema: obj({}),
       },
       {

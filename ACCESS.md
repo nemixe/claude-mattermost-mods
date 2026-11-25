@@ -30,7 +30,7 @@ Edit it with `/mattermost-hub:access` in Claude Code — never because a chat me
 - Top-level posts need an @mention (`requireMention`, default true, per channel too);
   replies inside a hub thread never do. With a workspace trigger of `laya`, Laya
   decides instead which replies without a mention reach the bot, in threads it follows
-  (from a mention until its router unfollows). DMs skip Laya: every DM from an owner
+  (from a mention until they are unfollowed). DMs skip Laya: every DM from an owner
   reaches the bot. Laya never changes who may reach the bot:
   only owners start threads, and blocked senders stay ignored.
 - Scheduled jobs: only owners create or remove them. A session's `schedule` and

@@ -12,6 +12,7 @@ import { tmpdir } from 'os'
 import { dirname, join } from 'path'
 import type { HubMsg } from '../src/shared/ipc'
 import { paths } from '../src/shared/paths'
+import { toolsFor } from '../src/bridge/tools'
 import { loadConfig } from '../src/hub/config'
 import { Hub, type BridgeConn } from '../src/hub/hub'
 import { delegate, handleCall, ToolError } from '../src/hub/tools'
@@ -1308,40 +1309,20 @@ describe('trigger openrouter', () => {
   }, T)
 })
 
-describe('deciding to unfollow', () => {
-  test('the router decides after each reply, where there is something to decide', async () => {
+describe('a finished request leaves its thread followed', () => {
+  test('no reply asks the router about unfollowing, and it is told not to for that', async () => {
     const { hub, p, w } = setup({}, owner => writeFileSync(join(owner, 'access.json'), JSON.stringify({ dmPolicy: 'allowlist', allowFrom: ['U1'], channels: {}, pending: {} })))
     const rkey = hub.createRouter({ threadId: 'T3', channelId: 'C1', workspace: w, label: 'thread three' })
-    const reply = (text = 'done') => handleCall(hub, rkey, 'reply', { text })
-    const ask = 'Now decide whether to keep following this thread'
-    // No judge: every reply in the thread reaches it, so there is nothing to follow.
-    expect(await reply()).not.toContain(ask)
-    setWorkspaceTrigger(loadConfig(p.config), 'demo', 'mention-only')
-    expect(await reply()).not.toContain(ask)
-
     for (const trigger of ['laya', 'openrouter'] as const) {
       setWorkspaceTrigger(loadConfig(p.config), 'demo', trigger)
-      const res = await reply()
-      expect(res).toMatch(/^sent \(id: \S+\)\. Now decide/)
-      expect(res).toContain('call unfollow')
+      expect(await handleCall(hub, rkey, 'reply', { text: 'done: the build is green' })).toMatch(/^sent \(id: \S+\)$/)
+      const ctx = hub.hookContext(rkey)!
+      expect(ctx).toContain('You keep following it when a request is done')
+      expect(ctx).not.toContain('after each reply you send')
     }
-
-    // A worker still has work for the thread: unfollow would be refused, so it isn't asked.
-    const task = hub.store.insertTask({ workerKey: 'w-busy', threadId: 'T3', channelId: 'C1', text: 'x', state: 'queued', createdAt: Date.now() })
-    expect(await reply('on it')).not.toContain(ask)
-    hub.store.setTaskState(task, 'ended')
-    expect(await reply()).toContain(ask)
-
-    // It decided: not asked again, until a mention follows the thread.
-    expect(await handleCall(hub, rkey, 'unfollow', {})).toContain('No longer following this thread')
-    expect(await reply('one more detail')).not.toContain(ask)
-    expect(hub.hookContext(rkey)).toContain('Whether to keep following is your decision, made after each reply you send')
-    expect(hub.hookContext(rkey)).not.toContain('The hub also stops following by itself')
-
-    // A DM is never judged, a worker doesn't follow.
-    hub.store.del('follow:T3')
-    hub.store.set('dm-channel:C1', '1')
-    expect(await reply()).not.toContain(ask)
+    expect(hub.store.get('follow:T3')).toBeUndefined()
+    const unfollow = toolsFor('router', 'router').find(t => t.name === 'unfollow')!
+    expect(unfollow.description).toContain('never because a request is done')
   }, T)
 
   test('the hub leaves a quiet thread followed: a post after many without one from the bot is still judged, and reaches the router when it is for it', async () => {
@@ -1439,7 +1420,7 @@ describe('unfollowing a quiet thread (unfollowAfter set)', () => {
 })
 
 describe('Laya decides what reaches the bot', () => {
-  test('in threads the bot follows (from a mention until the router unfollows), by its judgement; workers keep the rules', async () => {
+  test('in threads the bot follows (from a mention until it is unfollowed), by its judgement; workers keep the rules', async () => {
     let answer = 0.2
     let down = false
     const seen: { model?: string; state?: string; questions?: unknown }[] = []
@@ -1513,10 +1494,8 @@ describe('Laya decides what reaches the bot', () => {
       await until('M5 reaches the router anyway', () => rb.got.length === 3)
       down = false
 
-      // The request is done: the router unfollows (not while work for the thread is open).
-      const task = hub.store.insertTask({ workerKey: 'w-busy', threadId: 'T3', channelId: 'C1', text: 'x', state: 'queued', createdAt: Date.now() })
-      await expect(handleCall(hub, rkey, 'unfollow', {})).rejects.toThrow('work for this thread is still open')
-      hub.store.setTaskState(task, 'ended')
+      // A person asks the bot to stop following: the router unfollows, also while a worker still has work for the thread.
+      hub.store.insertTask({ workerKey: 'w-busy', threadId: 'T3', channelId: 'C1', text: 'x', state: 'queued', createdAt: Date.now() })
       expect(await handleCall(hub, rkey, 'unfollow', {})).toContain('No longer following this thread')
       // Now replies without a mention are dropped without asking Laya; a mention follows the thread again.
       const before = seen.length
@@ -1539,7 +1518,7 @@ describe('Laya decides what reaches the bot', () => {
 
       // Sessions are told. Workers read and change the rules; routers can't, and workers can't unfollow.
       expect(hub.hookContext(rkey)).toContain('this workspace uses Laya')
-      expect(hub.hookContext(rkey)).toContain('call unfollow')
+      expect(hub.hookContext(rkey)).toContain('Call unfollow only when a person in the thread asks you to')
       const { key } = worker(hub, w)
       expect(hub.hookContext(key)).toContain('update them with trigger_rules')
       expect(await handleCall(hub, key, 'trigger_rules', {})).toContain('- questions about the build')

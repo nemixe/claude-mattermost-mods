@@ -195,19 +195,18 @@ on, the bot **follows** each thread it is @mentioned in:
 - **While followed,** each reply without a mention goes to Laya, and reaches the router
   only when Laya judges it meant for the bot. The next message that does get through
   tells the router how many it didn't get (`fetch_thread` shows them).
-- **Done → unfollowed.** The router decides. After each reply it sends, the hub asks it
-  whether to keep following: when the request is done (the result is posted, and nothing
-  waits on the person or a worker), it calls `unfollow`. The hub doesn't ask while a worker
-  still has work for the thread, and refuses `unfollow` then. From then on, replies without
-  a mention are ignored, without asking Laya.
+- **Done → still followed.** A finished request doesn't end it: follow-up questions without
+  a mention go on to Laya.
+- **Asked to stop → unfollowed.** When a person in the thread asks the bot to stop following
+  it, the router calls `unfollow`. Owners can switch by hand with `!unfollow` and `!follow`
+  in the thread. Once unfollowed, replies without a mention are ignored, without asking Laya.
 - **Quiet → still followed.** However many posts go by without one from the bot, they go on
   to Laya. Set `unfollowAfter` in `config.json` to have the hub also stop following by
   itself once that many posts went by since the bot's last one there, counting the new one
   (it isn't judged, and later ones without a mention are ignored). It applies to
-  `openrouter` too. The default, `0`, leaves it to the router.
+  `openrouter` too. The default, `0`, is never.
 - **A new mention follows the thread again.** The router hears how many messages it
-  missed while it wasn't following, and why it stopped. Owners can also switch by hand with
-  `!unfollow` and `!follow` in the thread.
+  missed while it wasn't following, and why it stopped.
 
 Posts outside the bot's threads still need a mention. DMs are never judged: every DM from
 an owner reaches the bot, without a mention, and there is nothing to follow or unfollow.
@@ -334,8 +333,8 @@ needs comes from its OpenRouter listing (`openrouter.api` overrides it).
 `mmhub openrouter` says whether the key and model work, with one test judgement (a
 fraction of a cent), and `mmhub doctor` checks it too.
 
-Everything else is as with Laya: the bot follows threads from a mention until the router
-unfollows, the workspace's `TRIGGER.md` rules apply, and a thread of only the bot and one
+Everything else is as with Laya: the bot follows threads from a mention until they are
+unfollowed, the workspace's `TRIGGER.md` rules apply, and a thread of only the bot and one
 person needs no judge. The model gets the same view of the thread (who is in it, up to
 `openrouter.messages` (10) posts before the reply, the reply marked `>>`) and the rules. A
 decision model gets Laya's own questions and is decided as Laya is: the reply is for the
@@ -550,7 +549,7 @@ itself, see [Lifecycle](#lifecycle); 0 = never), `busyWatchdogMinutes` (30), `ro
 `gitBin`, `path`, `tmuxSocket` (`mmhub`), `providers` (`["default"]`),
 `providerCooldownMinutes` (`{auth:60, quota:60, rate_limit:10, errors:15, channels:360}`),
 `trigger` (`mention`; or `mention-only`, `laya`, `openrouter`, see [above](#answering-without-a-mention-laya)),
-`unfollowAfter` (0: only the router decides to stop following a thread; with `laya` or
+`unfollowAfter` (0: a thread stays followed until someone asks to stop; with `laya` or
 `openrouter`, a number makes the hub stop by itself after this many posts without one from
 the bot), `openrouter` ([above](#a-hosted-judge-openrouter)), `laya`
 (`{url: "http://127.0.0.1:11434", model: "laya", threshold: 0.45, ruleThreshold: 0.85, kindThreshold: 0.7, timeoutMs: 5000, messages: 10}`).

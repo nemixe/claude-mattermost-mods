@@ -3,9 +3,8 @@
  * (Laya, or a hosted model through OpenRouter: openrouter.ts).
  *
  * A hub thread is *followed* from the bot's first @mention in it, until its
- * router calls `unfollow` (the request is done, which it decides after each reply:
- * tools.ts followChoice) or an owner sends `!unfollow`. A later mention follows it
- * again. While a thread is followed, `decideInbound` sends each reply without a
+ * router calls `unfollow` (a person asked it to; a request being done is no reason)
+ * or an owner sends `!unfollow`. A later mention follows it again. While a thread is followed, `decideInbound` sends each reply without a
  * mention to Laya (`classify`). It is judged off the hub's chain, so a slow or
  * absent Laya never holds up other events, and the hub acts on the verdict back on
  * the chain. Posts of one thread are judged and acted on in the order they came. In

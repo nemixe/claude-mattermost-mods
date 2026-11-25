@@ -95,13 +95,13 @@ export type HubConfig = {
   /**
    * For workspaces without their own `trigger`: "mention" (a mention starts a thread;
    * every reply in it reaches the bot) or "laya" (the bot follows a thread from a
-   * mention until its router unfollows; meanwhile Laya judges replies without one).
+   * mention until it is unfollowed; meanwhile Laya judges replies without one).
    */
   trigger: Trigger
   /**
    * Triggers "laya" and "openrouter": the hub stops following a thread by itself once
    * this many posts went by since the bot's last post there. A mention follows it
-   * again. 0 (default): never, the router alone decides, after each reply.
+   * again. 0 (default): never; only when a person asks its router to, or an owner sends !unfollow.
    */
   unfollowAfter: number
   /** Where Laya runs and how it decides (laya.ts DEFAULT_LAYA). */

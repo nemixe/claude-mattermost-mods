@@ -94,8 +94,8 @@ Arguments passed: `$ARGUMENTS`
   DMs, 🔐 answers (`yes abcde`, ✅/❌) and `!` commands need no mention. Pick it when
   people talk among themselves in the bot's threads and want it to stay quiet. Running
   sessions learn about it at `mmhub session restart all`. `laya`: the bot follows a thread from its first mention until the
-  router calls `unfollow` (request done; the hub asks it to decide after each reply) or an
-  owner sends `!unfollow`. The hub stops by itself only when `unfollowAfter` in config.json
+  router calls `unfollow` (only when a person in it asks the bot to stop following; a
+  finished request doesn't end it) or an owner sends `!unfollow`. The hub stops by itself only when `unfollowAfter` in config.json
   says after how many posts without one from the bot (default 0 = never). While followed,
   a reply from the one person who shares the thread with the bot always reaches it
   (unless it @mentions someone else). With more people, the local Laya model judges
