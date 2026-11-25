@@ -87,6 +87,7 @@ export function buildSnapshot(i: SnapshotInput): HubSnapshot {
         .sort((a, b) => Number(isLive(b.status)) - Number(isLive(a.status)) || b.lastActiveAt - a.lastActiveAt),
     }
     if (w.description) ws.description = w.description
+    if (w.unreadable) ws.unreadable = w.unreadable
     const owner = personalOwner(w)
     if (owner) ws.label = `@${owner}`
     const prov = i.provider?.(w)

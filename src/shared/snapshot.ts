@@ -68,6 +68,8 @@ export type WorkspaceSnapshot = {
   description?: string
   /** Whose personal workspace it is, as `@user` (its name is `personal-<user id>`). */
   label?: string
+  /** Why the hub can't read it, when it can't (its repos and settings are not known then). */
+  unreadable?: string
   channels: { id: string; name: string; permalink?: string }[]
   repos: { name: string; path: string }[]
   sessions: SessionSnapshot[]

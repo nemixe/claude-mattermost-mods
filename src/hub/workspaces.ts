@@ -20,7 +20,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs'
 import { basename, dirname, isAbsolute, join, resolve } from 'path'
 import { expandHome } from '../shared/paths'
-import { readJson, slug, writeJsonAtomic } from '../shared/util'
+import { denied, logUnreadable, readable, readJson, slug, Unreadable, writeJsonAtomic } from '../shared/util'
 import { hours, isTrigger, type HubConfig, type IdleMinutes, type Trigger } from './config'
 
 export type RepoRef = { name: string; path: string }
@@ -55,7 +55,11 @@ export type WorkspaceManifest = {
   trigger?: Trigger
 }
 
-export type Workspace = WorkspaceManifest & { dir: string }
+export type Workspace = WorkspaceManifest & {
+  dir: string
+  /** Why workspace.json couldn't be read: the settings and repos here are only defaults, to act on as little as possible. */
+  unreadable?: string
+}
 
 export const WORKSPACE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 const REPO_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
@@ -84,14 +88,37 @@ export function loadWorkspace(cfg: HubConfig, name: string): Workspace | undefin
   const dir = workspaceDir(cfg, name)
   const file = join(dir, 'workspace.json')
   if (!existsSync(file)) return undefined
-  const m = readJson<WorkspaceManifest>(file, () => ({ name, repos: [] }))
-  return { ...m, name, repos: m.repos ?? [], dir }
+  try {
+    const m = readJson<WorkspaceManifest>(file, () => ({ name, repos: [] }))
+    readable(file)
+    return { ...m, name, repos: m.repos ?? [], dir }
+  } catch (err) {
+    if (!(err instanceof Unreadable)) throw err
+    logUnreadable(err)
+    return { name, repos: [], dir, unreadable: err.message }
+  }
 }
 
+/** loadWorkspace for what depends on the manifest: throws when there is none, or it can't be read. */
+function manifestOf(cfg: HubConfig, name: string): Workspace {
+  const w = loadWorkspace(cfg, name)
+  if (!w) throw new Error(`no workspace named ${name}`)
+  if (w.unreadable) throw new Error(w.unreadable)
+  return w
+}
+
+/** The workspaces on disk. Throws Unreadable when their folder can't be read. */
 export function listWorkspaces(cfg: HubConfig): Workspace[] {
   const root = resolve(cfg.workspacesDir)
   if (!existsSync(root)) return []
-  return readdirSync(root, { withFileTypes: true })
+  let entries
+  try {
+    entries = readdirSync(root, { withFileTypes: true })
+  } catch (err) {
+    throw new Unreadable(root, denied(err))
+  }
+  readable(root)
+  return entries
     .filter(d => d.isDirectory() && !d.name.startsWith('.'))
     .map(d => loadWorkspace(cfg, d.name))
     .filter((w): w is Workspace => !!w)
@@ -99,7 +126,8 @@ export function listWorkspaces(cfg: HubConfig): Workspace[] {
 }
 
 function saveManifest(w: Workspace): void {
-  const { dir, ...m } = w
+  const { dir, unreadable, ...m } = w
+  if (unreadable) throw new Error(unreadable) // what is in the file isn't known: don't write over it
   writeJsonAtomic(join(dir, 'workspace.json'), m, 0o644)
 }
 
@@ -287,8 +315,7 @@ async function unattendedEnv(git: string): Promise<Record<string, string | undef
  * the hub (no one to answer git's prompts), with a time limit on the clone.
  */
 export async function addRepo(cfg: HubConfig, wsName: string, source: string, name?: string, o: { unattended?: boolean; timeoutMs?: number } = {}): Promise<RepoRef> {
-  const w = loadWorkspace(cfg, wsName)
-  if (!w) throw new Error(`no workspace named ${wsName}`)
+  const w = manifestOf(cfg, wsName)
   const taken = (ws: Workspace, repo: RepoRef) => {
     if (ws.repos.some(r => r.name === repo.name)) throw new Error(`workspace ${wsName} already has a repo named ${repo.name}`)
     const same = ws.repos.find(r => resolve(r.path) === resolve(repo.path))
@@ -318,8 +345,7 @@ export async function addRepo(cfg: HubConfig, wsName: string, source: string, na
     repo = { name: n, path: p }
   }
   // The manifest as it is now: a clone takes a while, and something else may have changed it meanwhile.
-  const now = loadWorkspace(cfg, wsName)
-  if (!now) throw new Error(`no workspace named ${wsName}`)
+  const now = manifestOf(cfg, wsName)
   taken(now, repo)
   now.repos.push(repo)
   saveManifest(now)
@@ -333,8 +359,7 @@ export function isExternal(w: Workspace, path: string): boolean {
 
 /** Set what makes the bot take posts in a workspace's channels; undefined goes back to config.json's. */
 export function setWorkspaceTrigger(cfg: HubConfig, wsName: string, trigger: Trigger | undefined): Workspace {
-  const w = loadWorkspace(cfg, wsName)
-  if (!w) throw new Error(`no workspace named ${wsName}`)
+  const w = manifestOf(cfg, wsName)
   if (trigger) w.trigger = trigger
   else delete w.trigger
   saveManifest(w)
@@ -343,8 +368,7 @@ export function setWorkspaceTrigger(cfg: HubConfig, wsName: string, trigger: Tri
 
 /** Set a workspace's provider chain; an empty list goes back to the hub-wide one. */
 export function setWorkspaceProviders(cfg: HubConfig, wsName: string, providers: string[]): Workspace {
-  const w = loadWorkspace(cfg, wsName)
-  if (!w) throw new Error(`no workspace named ${wsName}`)
+  const w = manifestOf(cfg, wsName)
   if (providers.length) w.providers = providers
   else delete w.providers
   saveManifest(w)
@@ -352,8 +376,7 @@ export function setWorkspaceProviders(cfg: HubConfig, wsName: string, providers:
 }
 
 export function removeRepo(cfg: HubConfig, wsName: string, name: string): boolean {
-  const w = loadWorkspace(cfg, wsName)
-  if (!w) throw new Error(`no workspace named ${wsName}`)
+  const w = manifestOf(cfg, wsName)
   const before = w.repos.length
   w.repos = w.repos.filter(r => r.name !== name)
   if (w.repos.length === before) return false
@@ -383,6 +406,7 @@ async function isGitRepo(git: string, path: string): Promise<boolean> {
  * Reuses an existing worktree or branch. Non-git folders are shared in place.
  */
 export async function prepareWorktree(cfg: HubConfig, w: Workspace, workerKey: string, repoName: string): Promise<Worktree> {
+  if (w.unreadable) throw new Error(w.unreadable)
   const repo = w.repos.find(r => r.name === repoName)
   if (!repo) throw new Error(`workspace ${w.name} has no repo named ${repoName} (repos: ${w.repos.map(r => r.name).join(', ') || 'none'})`)
   const git = cfg.gitBin ?? 'git'

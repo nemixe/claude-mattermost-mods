@@ -364,6 +364,21 @@ for (const surface of ['terminal', 'desktop'] as const) {
       await ui.unmount()
     })
 
+    test("a workspace the hub can't read says why, instead of repos and provider it doesn't know", async ($, on) => {
+      const snap = fixture()
+      const ws = snap.workspaces[0]!
+      ws.unreadable = "can't read /Volumes/ssd/acme/workspace.json (EPERM)"
+      ws.repos = []
+      const w = world(on, JSON.stringify(snap))
+      await start($)
+      const ui = await $.ui.mount({ ...PANE, surface })
+      const warning = await ui.find({ type: 'Text', text: /^⚠ the hub can't read \/Volumes\/ssd\/acme\/workspace\.json \(EPERM\)$/ })
+      expect(warning?.props.color).toBe('error')
+      expect(await ui.find({ type: 'Text', text: /0 repos/ })).toBeUndefined()
+      await ui.unmount()
+      expect(w.runs).toEqual([])
+    })
+
     test('Restart waits for the turn; a pending one offers Restart now', async ($, on) => {
       const snap = fixture()
       const router = snap.workspaces[0]!.sessions[0]!

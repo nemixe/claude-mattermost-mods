@@ -117,6 +117,7 @@ export async function runCommand(hub: Hub, a: Extract<InboundAction, { kind: 'co
         if (sub === 'rm') {
           const w = hub.store.worker(key)!
           const ws = loadWorkspace(hub.cfg, w.workspace)
+          if (ws?.unreadable) return say(`Not removing \`${key}\`: its worktrees can't be cleaned up, the hub ${ws.unreadable}.`)
           await hub.close(key, 'manual')
           const kept = ws ? await removeWorktrees(hub.cfg, ws, w.repos) : []
           hub.store.deleteWorker(key)
@@ -214,7 +215,7 @@ async function cron(hub: Hub, a: Extract<InboundAction, { kind: 'command' }>, po
 export async function askWorkspace(hub: Hub, post: MMPost, channelType: string): Promise<void> {
   const threadId = post.root_id || post.id
   hub.awaiting.set(threadId, { channelId: post.channel_id, channelType, post, askedAt: Date.now() })
-  const names = listWorkspaces(hub.cfg).map(w => `\`${w.name}\``)
+  const names = hub.workspaces().map(w => `\`${w.name}\``)
   await hub.replyTo(post, [
     `${channelType === 'D' ? 'This chat' : 'This channel'} is not connected to a workspace yet. Answer with one of these (here, or in this thread):`,
     names.length ? `- an existing workspace name: ${names.join(', ')}` : '- (no workspaces yet)',

@@ -43,7 +43,13 @@ const token = env.MATTERMOST_BOT_TOKEN
 if (!url || !token) fail(`MATTERMOST_URL and MATTERMOST_BOT_TOKEN must be set in ${p.env} — run /mattermost-hub:configure`)
 for (const k of Object.keys(process.env)) if (k.startsWith('MATTERMOST_')) delete process.env[k]
 
-const cfg = loadConfig(p.config)
+const cfg = (() => {
+  try {
+    return loadConfig(p.config)
+  } catch (err) {
+    return fail(errMsg(err))
+  }
+})()
 try {
   ensureTemplate(cfg) // <workspacesDir>/workspace-template, copied into each new workspace
 } catch (err) {

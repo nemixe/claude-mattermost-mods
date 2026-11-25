@@ -30,7 +30,7 @@ import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSy
 import { homedir } from 'os'
 import { dirname, join, resolve } from 'path'
 import { expandHome } from '../shared/paths'
-import { readJson, writeJsonAtomic } from '../shared/util'
+import { peekJson, readJson, writeJsonAtomic } from '../shared/util'
 import { retryDelay, type FailureKind } from './lifecycle'
 import { shq, transcriptPath } from './spawn'
 
@@ -231,7 +231,7 @@ export function ensureConfigDir(stateDir: string, name: string, dir: string, bas
 
 /** What a config dir's .claude.json says about signing in (a hint: real failures show at startup). */
 export function loginState(configDir: string): 'signed-in' | 'not-signed-in' {
-  const j = readJson<Record<string, unknown> | null>(join(configDir, '.claude.json'), () => null)
+  const j = peekJson<Record<string, unknown> | null>(join(configDir, '.claude.json'), () => null)
   if (!j || j.hasCompletedOnboarding !== true) return 'not-signed-in'
   const acct = j.oauthAccount
   return acct && typeof acct === 'object' && Object.keys(acct).length ? 'signed-in' : 'not-signed-in'

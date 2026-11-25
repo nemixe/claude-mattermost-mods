@@ -608,10 +608,21 @@ export async function renderPane($: EngineInterface, e: RenderInput<'Pane'>) {
           </Text>
           {w.label ? <Text dimColor>{` ${w.name}`}</Text> : null}
         </Text>
-        <Text dimColor wrap="truncate-end">
-          {`${channels || 'no channels'} · ${repos} ${repos === 1 ? 'repo' : 'repos'}`}
-        </Text>
-        {provider ? (
+        {w.unreadable ? (
+          <>
+            <Text dimColor wrap="truncate-end">
+              {channels || 'no channels'}
+            </Text>
+            <Text color="error" wrap="wrap">
+              {`⚠ the hub ${w.unreadable}`}
+            </Text>
+          </>
+        ) : (
+          <Text dimColor wrap="truncate-end">
+            {`${channels || 'no channels'} · ${repos} ${repos === 1 ? 'repo' : 'repos'}`}
+          </Text>
+        )}
+        {provider && !w.unreadable ? (
           <Text wrap="truncate-end">
             <Text color={provider.tone}>{provider.head}</Text>
             {provider.rest ? <Text dimColor>{` · ${provider.rest}`}</Text> : null}

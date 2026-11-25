@@ -19,7 +19,8 @@ export async function control(hub: Hub, op: string, args: Record<string, unknown
     case 'status':
       return { ok: true, message: 'ok', data: hub.snapshot() }
     case 'reload': {
-      hub.reloadConfig()
+      const unread = hub.reloadConfig()
+      if (unread) return { ok: false, message: `config not reloaded: ${unread}` }
       // Changed provider chains: live sessions move over (after their current turn).
       const moved = await hub.enqueue(() => hub.rebalanceProviders())
       await hub.enqueue(() => hub.keepLaya()) // laya-serve switched on, or its port changed

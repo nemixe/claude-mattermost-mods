@@ -8,7 +8,7 @@ import { homedir } from 'os'
 import { join } from 'path'
 import type { Paths } from '../shared/paths'
 import type { Role } from '../shared/ipc'
-import { readJson } from '../shared/util'
+import { peekJson } from '../shared/util'
 import type { Workspace } from './workspaces'
 
 /** Single-quote for sh (hook commands run through a shell). */
@@ -87,7 +87,7 @@ export function buildSettings(o: { workspaceSettings: Settings; hookCommand: str
 
 /** Keys from the user's own settings that spawned sessions still need (setting-sources skips user settings). */
 export function carriedUserSettings(permissionMode: string, configDir = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude')): Settings {
-  const user = readJson<Settings>(join(configDir, 'settings.json'), () => ({}))
+  const user = peekJson<Settings>(join(configDir, 'settings.json'), () => ({}))
   const out: Settings = {}
   if (permissionMode === 'bypassPermissions' && user.skipDangerousModePermissionPrompt) out.skipDangerousModePermissionPrompt = true
   if (permissionMode === 'auto' && user.skipAutoPermissionPrompt) out.skipAutoPermissionPrompt = true
@@ -114,7 +114,7 @@ export function writeSessionFiles(o: {
   const f = sessionFiles(o.paths, o.key)
   mkdirSync(f.dir, { recursive: true, mode: 0o700 })
 
-  const extra = readJson<{ mcpServers?: Record<string, unknown> }>(join(o.workspace.dir, '.mcp.json'), () => ({})).mcpServers ?? {}
+  const extra = peekJson<{ mcpServers?: Record<string, unknown> }>(join(o.workspace.dir, '.mcp.json'), () => ({})).mcpServers ?? {}
   const { mmhub: _reserved, ...wsServers } = extra
   const mcp = {
     mcpServers: {

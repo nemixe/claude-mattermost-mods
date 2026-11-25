@@ -139,7 +139,7 @@ export async function requestChannel(hub: Hub, w: Workspace): Promise<string | u
 export function listWorkspacesText(hub: Hub, key: string): string {
   const mine = workspaceOf(hub, key)
   const bound = new Set(Object.values(loadBindings(hub.p.bindings)))
-  const lines = listWorkspaces(hub.cfg).filter(w => w.name !== mine).map(w => {
+  const lines = hub.workspaces().filter(w => w.name !== mine).map(w => {
     const why = !accepts(w, mine) ? ' — does not take requests from your workspace' : !bound.has(w.name) ? ' — has no channel, so it cannot take requests' : ''
     const repos = w.repos.length ? ` (repos: ${w.repos.map(r => r.name).join(', ')})` : ''
     return `- ${w.name}${w.description ? `: ${w.description}` : ''}${repos}${why}`
@@ -182,6 +182,7 @@ export async function messageWorkspace(hub: Hub, key: string, a: { workspace?: s
   if (!a.workspace) throw new ToolError('missing "workspace" (or pass request_id to follow up)')
   const target = hub.ws(a.workspace)
   if (!target) throw new ToolError(`no workspace "${a.workspace}" — list_workspaces shows them`)
+  if (target.unreadable) throw new ToolError(`workspace ${target.name} can't take requests now: the hub ${target.unreadable}`)
   if (target.name === mine) throw new ToolError(`"${mine}" is your own workspace${key.startsWith('w-') ? ': ask through your thread\'s router instead' : ': delegate to its workers instead'}`)
   if (!accepts(target, mine)) throw new ToolError(`workspace ${target.name} doesn't take requests from ${mine} (its acceptFrom setting)`)
   const home = homeThread(hub, key, a.threadId)

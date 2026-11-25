@@ -1,14 +1,15 @@
 import { describe, expect, test } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { DEFAULT_CONFIG, isTrigger, loadConfig, type HubConfig } from '../src/hub/config'
 import { DEFAULT_ROUTER_PERSONA, routerContext, routerPersona, routerPrompt, workerContext, workerPrompt } from '../src/hub/prompts'
 import { buildSnapshot } from '../src/hub/status'
 import type { SessionRow } from '../src/hub/store'
+import { Unreadable } from '../src/shared/util'
 import {
   addRepo, bindChannel, channelsOf, createWorkspace, effective, ensureTemplate, externalRepoPaths, listWorkspaces, loadBindings, loadWorkspace,
-  prepareWorktree, removeWorktrees, setWorkspaceTrigger, TEMPLATE_DIR, unbindChannel, validName,
+  prepareWorktree, removeWorktrees, removeRepo, setWorkspaceProviders, setWorkspaceTrigger, TEMPLATE_DIR, unbindChannel, validName,
 } from '../src/hub/workspaces'
 
 function setup(): { cfg: HubConfig; root: string } {
@@ -45,6 +46,50 @@ describe('workspaces', () => {
     expect(validName('../x')).toBe(false)
     expect(validName('a..b')).toBe(false)
     expect(loadWorkspace(cfg, 'nope')).toBeUndefined()
+  })
+
+  test('a workspace.json that can\'t be read is neither moved, written over nor acted on', async () => {
+    const { cfg, root } = setup()
+    const w = createWorkspace(cfg, 'demo')
+    const r = await repo(join(root, 'app'))
+    await addRepo(cfg, 'demo', r)
+    const file = join(w.dir, 'workspace.json')
+    const before = readFileSync(file, 'utf8')
+    const files = readdirSync(w.dir).sort()
+    chmodSync(file, 0)
+    const off = loadWorkspace(cfg, 'demo')!
+    expect(off.unreadable).toBe(`can't read ${file} (EACCES)`)
+    expect(listWorkspaces(cfg).map(x => x.name)).toEqual(['demo'])
+    const why = "can't read"
+    await expect(addRepo(cfg, 'demo', await repo(join(root, 'other')))).rejects.toThrow(why)
+    expect(() => removeRepo(cfg, 'demo', 'app')).toThrow(why)
+    expect(() => setWorkspaceTrigger(cfg, 'demo', 'laya')).toThrow(why)
+    expect(() => setWorkspaceProviders(cfg, 'demo', ['x'])).toThrow(why)
+    await expect(prepareWorktree(cfg, off, 'w-1', 'app')).rejects.toThrow(why)
+    chmodSync(file, 0o644)
+    expect(readFileSync(file, 'utf8')).toBe(before)
+    expect(readdirSync(w.dir).sort()).toEqual(files)
+    expect(loadWorkspace(cfg, 'demo')!.unreadable).toBeUndefined()
+  })
+
+  test('a workspaces folder that can\'t be read is not an empty one', () => {
+    const { cfg } = setup()
+    createWorkspace(cfg, 'demo')
+    chmodSync(cfg.workspacesDir, 0o300)
+    expect(() => listWorkspaces(cfg)).toThrow(Unreadable)
+    chmodSync(cfg.workspacesDir, 0o755)
+    expect(listWorkspaces(cfg).length).toBe(1)
+  })
+
+  test('bindings that can\'t be read are not written over', () => {
+    const { root } = setup()
+    const file = join(root, 'bindings.json')
+    bindChannel(file, 'C1', 'demo')
+    chmodSync(file, 0)
+    expect(() => bindChannel(file, 'C2', 'demo')).toThrow(Unreadable)
+    expect(() => unbindChannel(file, 'C1')).toThrow(Unreadable)
+    chmodSync(file, 0o600)
+    expect(loadBindings(file)).toEqual({ C1: 'demo' })
   })
 
   test('repos: local path, duplicates refused, external paths, effective settings', async () => {

@@ -2,7 +2,10 @@
 /**
  * mmhub — control the Mattermost hub.
  *
- *   mmhub start [--json]            start the daemon (detached; logs to hub.log); restarts one whose heartbeat stopped
+ *   mmhub start [--no-agent] [--json]
+ *                                   start the daemon (logs to hub.log); restarts one whose heartbeat stopped. Through
+ *                                   launchd when the agent is installed (--no-agent: detached, from this shell, which
+ *                                   macOS may keep out of external disks and protected folders)
  *   mmhub stop [--json]             stop it (sessions keep running; adopted at next start)
  *   mmhub status [--json]           hub, workspaces and sessions
  *   mmhub logs [-n N] [-f]          hub log
@@ -22,7 +25,9 @@
  *                                   model through OpenRouter) finds meant for it (TRIGGER.md rules)
  *   mmhub repo add <ws> <path|git-url> [--name <n>] | rm <ws> <name>
  *   mmhub lookup user <username> | lookup channel <team> <channel>   Mattermost ids
- *   mmhub agent install|uninstall   (macOS) start the hub at login via launchd
+ *   mmhub agent install [--force] | uninstall
+ *                                   (macOS) start the hub at login via launchd (--force: replace an agent that runs
+ *                                   a launcher of your own; its plist is kept as .old)
  *   mmhub laya install [--port N] [--device cpu|mps|cuda] [--english-only] [--unload-after MIN]
  *                                   Laya without Ollama: install Laya's own server (laya-serve, Python via
  *                                   uv) and its English and multilingual models in the state dir; the hub
@@ -63,15 +68,16 @@
 
 import { spawn as nodeSpawn } from 'child_process'
 import { randomBytes } from 'crypto'
-import { existsSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
-import { join } from 'path'
+import { dirname, join } from 'path'
 import { roundTrip, type HubMsg } from './shared/ipc'
 import { DEFAULT_LAYA, DEFAULT_TRIGGER_MD, layaReady, loadTrigger, triggerFile, type LayaCall, type LayaConfig, type ServeConfig } from './hub/laya'
 import { DEFAULT_SERVE_PORT, DEFAULT_UNLOAD_MINUTES, installed, installedVersion, LAYA_PACKAGE, LAYA_PYTHON, SERVE_MODELS, SERVE_SESSION, serveEnv, serveKey, servePaths, startServe, warmUp } from './hub/layaserve'
 import { fmtLocal, hubTimezone, minGapMinutes, nextRun, parseSchedule, validTimezone } from './hub/cron'
 import { MIN_GAP_MINUTES } from './hub/jobs'
 import { cleanEnv, Tmux } from './hub/tmux'
+import { AGENT_LABEL, agentFile, agentFor, isCustom, launch, readAgent, unload, type Agent } from './launchd'
 import { paths, ROOT } from './shared/paths'
 import { SESSION_KEY_RE, type HubSnapshot, type SessionSnapshot } from './shared/snapshot'
 import { errMsg, fmtAge, isPidAlive, readEnvFile, readJson, setEnvVar, writeJsonAtomic } from './shared/util'
@@ -113,6 +119,12 @@ async function hubRunning(): Promise<boolean> {
   } catch {
     return false
   }
+}
+
+/** A hub process that is there but didn't answer (Bun doesn't say why a connection to it failed). */
+function silentHub(): string | undefined {
+  const pid = lockPid()
+  return pid ? `hub pid ${pid} is there but does not answer here: it is starting or stuck, or this process may not connect to it` : undefined
 }
 
 function lockPid(): number | undefined {
@@ -171,6 +183,8 @@ async function start(): Promise<never> {
     if (age === undefined || age <= HEARTBEAT_STALE_MS) out(true, `hub already running (pid ${lockPid() ?? '?'})`)
     restarted = `its heartbeat had stopped ${fmtAge(age)} ago`
   }
+  // The launchd agent's hub is started there (launchd.ts says why). Looked up before anything is stopped.
+  const agent: Agent | undefined = args.includes('--no-agent') ? undefined : await agentFor(p.dir)
   const env = readEnvFile(p.env)
   if (!env.MATTERMOST_URL || !env.MATTERMOST_BOT_TOKEN) {
     out(false, `${restarted ? `hub runs but ${restarted}; not restarting it: ` : ''}not configured: ${p.env} needs MATTERMOST_URL and MATTERMOST_BOT_TOKEN — run /mattermost-hub:configure`)
@@ -182,31 +196,50 @@ async function start(): Promise<never> {
     if (!(await stopHub())) out(false, `hub pid ${pid ?? '?'} runs but ${restarted}, and it did not stop — kill it and run mmhub start`)
   }
   mkdirSync(p.dir, { recursive: true, mode: 0o700 })
-  const logSize = existsSync(p.log) ? statSync(p.log).size : 0
-  const fd = openSync(p.log, 'a', 0o600)
-  const child = nodeSpawn(process.execPath, [join(ROOT, 'src', 'hub', 'main.ts')], {
-    detached: true,
-    stdio: ['ignore', fd, fd],
-    cwd: p.dir,
-    env: process.env,
-  })
-  let exited: number | null = null
-  child.on('exit', code => { exited = code ?? 0 })
-  child.unref()
-  const end = Date.now() + 20_000
+  const logFile = agent?.log ?? p.log
+  const logSize = existsSync(logFile) ? statSync(logFile).size : 0
+  /** What the hub logged since. */
+  const logged = () => (existsSync(logFile) ? readFileSync(logFile).subarray(logSize).toString('utf8') : '')
+  let exited: string | undefined
+  let pid: number | undefined
+  let refused: string | undefined
+  if (agent) void launch(agent).then(why => { refused = why })
+  else {
+    const fd = openSync(p.log, 'a', 0o600)
+    const child = nodeSpawn(process.execPath, [join(ROOT, 'src', 'hub', 'main.ts')], {
+      detached: true,
+      stdio: ['ignore', fd, fd],
+      cwd: p.dir,
+      env: process.env,
+    })
+    pid = child.pid
+    child.on('exit', code => { exited = `code ${code ?? 0}` })
+    child.unref()
+  }
+  const started = () => `hub ${restarted ? 'restarted' : 'started'}${agent ? ' by launchd' : ''} (pid ${pid ?? '?'})`
+  // launchd holds back a hub it started less than 30 s ago (ThrottleInterval).
+  const wait = agent ? 40_000 : 20_000
+  const end = Date.now() + wait
   while (Date.now() < end) {
     await Bun.sleep(400)
-    if (exited !== null) break
+    if (refused) {
+      out(false, `launchd did not start the hub${restarted ? ` (stopped for a restart: ${restarted})` : ''}: ${refused}. To start it from this shell instead, which macOS may keep out of external disks and protected folders: mmhub start --no-agent`)
+    }
+    if (agent) {
+      const now = lockPid()
+      if (pid && now !== pid) exited = 'it stopped right away'
+      pid = now
+    }
+    if (exited !== undefined) break
     if (await hubRunning()) {
       // Wait for "ready" (Mattermost connected) or a failure in the log.
-      const logNow = readFileSync(p.log, 'utf8').slice(logSize)
-      if (/mmhub hub: ready/.test(logNow)) out(true, restarted ? `hub restarted (pid ${child.pid}): ${restarted}` : `hub started (pid ${child.pid})`)
+      if (/mmhub hub: ready/.test(logged())) out(true, restarted ? `${started()}: ${restarted}` : started())
     }
   }
-  const fresh = readFileSync(p.log, 'utf8').slice(logSize).trim().split('\n').slice(-3).join(' | ')
-  if (exited !== null) out(false, `hub exited: ${fresh || `code ${exited}`}`)
-  if (await hubRunning()) out(true, `hub ${restarted ? 'restarted' : 'started'} (pid ${child.pid}), still connecting to Mattermost${restarted ? `: ${restarted}` : ''}`)
-  out(false, `hub did not come up in 20s: ${fresh}`)
+  const fresh = logged().trim().split('\n').slice(-3).join(' | ')
+  if (exited !== undefined) out(false, `hub exited: ${fresh || exited}`)
+  if (await hubRunning()) out(true, `${started()}, still connecting to Mattermost${restarted ? `: ${restarted}` : ''}`)
+  out(false, `hub did not come up in ${wait / 1000}s${agent ? ' (launchd was asked to run it)' : ''}: ${fresh || (silentHub() ?? 'nothing in its log')}`)
 }
 
 async function stop(): Promise<never> {
@@ -254,11 +287,11 @@ async function status(): Promise<never> {
   } catch {
     snap = readJson<HubSnapshot | undefined>(p.status, () => undefined)
   }
-  if (json) out(up, up ? `hub running (pid ${snap?.hub.pid}), ${snap?.caps.liveRouters ?? 0} routers, ${snap?.caps.liveWorkers ?? 0} workers live` : 'hub is not running')
+  if (json) out(up, up ? `hub running (pid ${snap?.hub.pid}), ${snap?.caps.liveRouters ?? 0} routers, ${snap?.caps.liveWorkers ?? 0} workers live` : (silentHub() ?? 'hub is not running'))
   const now = Date.now()
   const lines: string[] = []
-  if (!snap) out(false, 'hub is not running and has never written status.json')
-  lines.push(`hub ${up ? `● running pid ${snap.hub.pid} v${snap.hub.version}, up ${fmtAge(now - snap.hub.startedAt)}` : '○ down (last snapshot below)'}`)
+  if (!snap) out(false, silentHub() ?? 'hub is not running and has never written status.json')
+  lines.push(`hub ${up ? `● running pid ${snap.hub.pid} v${snap.hub.version}, up ${fmtAge(now - snap.hub.startedAt)}` : `○ ${silentHub() ?? 'down'} (last snapshot below)`}`)
   const age = heartbeatAge()
   if (up && age !== undefined && age > HEARTBEAT_STALE_MS) {
     lines.push(`  ⚠ but status.json's heartbeat stopped ${fmtAge(age)} ago (the panel shows the hub down): run mmhub start to restart it`)
@@ -267,6 +300,7 @@ async function status(): Promise<never> {
   lines.push(`live: routers ${snap.caps.liveRouters}/${snap.caps.maxLiveRouters}, workers ${snap.caps.liveWorkers}/${snap.caps.maxLiveWorkers}`)
   for (const w of snap.workspaces) {
     lines.push('', `workspace ${w.name}${w.label ? ` (${w.label})` : ''} — ${w.path}`)
+    if (w.unreadable) lines.push(`  ⚠ the hub ${w.unreadable}: its sessions can't start`)
     lines.push(`  channels: ${w.channels.map(c => c.name).join(', ') || 'none'} · repos: ${w.repos.map(r => r.name).join(', ') || 'none'}`)
     if (w.provider) lines.push(`  provider: ${providerSummary(w.provider, now)}`)
     for (const s of w.sessions) lines.push(sessionRow(s, now) + (s.provider && w.provider && s.provider !== w.provider.active ? `  (on ${s.provider})` : ''))
@@ -333,7 +367,10 @@ async function doctor(): Promise<never> {
     check(false, `workspace template: ${errMsg(err)}`)
   }
   const bindings = loadBindings(p.bindings)
-  for (const [ch, ws] of Object.entries(bindings)) check(!!loadWorkspace(cfg, ws), `channel ${ch} → workspace ${ws}`)
+  for (const [ch, ws] of Object.entries(bindings)) {
+    const w = loadWorkspace(cfg, ws)
+    check(!!w && !w.unreadable, `channel ${ch} → workspace ${ws}${w?.unreadable ? `: ${w.unreadable}` : ''}`)
+  }
   if (!Object.keys(bindings).length) check(true, 'no channels bound yet (mention the bot in a channel, or `mmhub ws bind`)')
   check(true, `models: router ${cfg.routerModel}, worker ${cfg.workerModel}; idle close: router ${cfg.idleMinutes.router}m, worker ${cfg.idleMinutes.worker}m; worker cleanup ${cfg.cleanupHours ? `after ${cfg.cleanupHours}h without work` : 'off'}`)
   const defs = loadProviders(p.dir)
@@ -1016,15 +1053,23 @@ async function provider(): Promise<never> {
   }
 }
 
-const AGENT_LABEL = 'com.claude.mmhub'
-
 /** launchd agent (macOS): start the hub at login, restart it if it crashes. */
 async function agent(): Promise<never> {
   if (process.platform !== 'darwin') out(false, 'launchd agents are macOS only — use your init system (run: bun src/hub/main.ts)')
   const sub = args[1]
-  const plist = join(process.env.HOME ?? '', 'Library', 'LaunchAgents', `${AGENT_LABEL}.plist`)
-  const uid = process.getuid?.() ?? 0
+  const plist = agentFile()
   if (sub === 'install') {
+    const force = args.includes('--force')
+    let was: Agent | undefined
+    try {
+      was = await readAgent(plist)
+    } catch (err) {
+      if (!force) out(false, `${errMsg(err)}; nothing changed (--force replaces it)`)
+    }
+    const own = existsSync(plist) && (!was || isCustom(was))
+    if (was && own && !force) {
+      out(false, `${plist} runs a launcher of your own (${was.args.join(' ') || 'no ProgramArguments'}); nothing changed. mmhub start uses it as it is. To replace it with the plain one: mmhub agent install --force`)
+    }
     const cfg = loadConfig(p.config)
     const PATH = cfg.path ?? process.env.PATH ?? '/usr/bin:/bin'
     const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;')
@@ -1045,19 +1090,22 @@ async function agent(): Promise<never> {
   <key>StandardErrorPath</key><string>${esc(p.log)}</string>
 </dict></plist>
 `
-    mkdirSync(join(process.env.HOME ?? '', 'Library', 'LaunchAgents'), { recursive: true })
+    mkdirSync(dirname(plist), { recursive: true })
+    const kept = own ? `${plist}.old` : undefined
+    if (kept) renameSync(plist, kept)
     await Bun.write(plist, xml)
-    if (await hubRunning()) await controlOp('shutdown')
-    await Bun.sleep(1000)
-    const r = Bun.spawnSync(['launchctl', 'bootstrap', `gui/${uid}`, plist])
-    out(r.exitCode === 0, r.exitCode === 0 ? `agent installed (${plist}); the hub now starts at login` : `launchctl bootstrap failed: ${r.stderr.toString().trim()}`)
+    if ((await hubRunning()) && !(await stopHub())) out(false, `wrote ${plist}, but the running hub (pid ${lockPid() ?? '?'}) did not stop: stop it, then run mmhub start`)
+    // An agent loaded before is loaded anew, with the new plist.
+    if (!(await unload())) out(false, `wrote ${plist}, but the agent loaded before did not go away: run mmhub agent install again`)
+    const failed = await launch((await readAgent(plist))!)
+    out(!failed, failed ?? `agent installed (${plist}); the hub now starts at login${kept ? `. Your launcher's plist is kept in ${kept}` : ''}`)
   }
   if (sub === 'uninstall') {
-    Bun.spawnSync(['launchctl', 'bootout', `gui/${uid}/${AGENT_LABEL}`])
-    if (existsSync(plist)) (await import('fs')).rmSync(plist)
+    await unload()
+    if (existsSync(plist)) rmSync(plist)
     out(true, 'agent removed (the hub is stopped; sessions keep running)')
   }
-  out(false, 'usage: mmhub agent install|uninstall')
+  out(false, 'usage: mmhub agent install [--force] | uninstall')
 }
 
 /** Resolve names to Mattermost ids with the bot token (for the access / workspace skills). */

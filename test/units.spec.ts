@@ -1,10 +1,10 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdtempSync, readFileSync } from 'fs'
+import { chmodSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { paths } from '../src/shared/paths'
-import { chunk, PERMISSION_REPLY_RE } from '../src/shared/util'
-import { classifySender, defaultAccess, isOwner, issuePairingCode, ownerNeedsBotCheck, pruneExpired } from '../src/hub/access'
+import { chunk, peekJson, PERMISSION_REPLY_RE, readJson, Unreadable } from '../src/shared/util'
+import { AccessStore, classifySender, defaultAccess, isOwner, issuePairingCode, ownerNeedsBotCheck, pruneExpired } from '../src/hub/access'
 import { buildDigest } from '../src/hub/digest'
 import { instructionsFor, toolsFor } from '../src/bridge/tools'
 import { PermissionDesk, promptText } from '../src/hub/permissions'
@@ -13,6 +13,39 @@ import { Store } from '../src/hub/store'
 import { cleanEnv } from '../src/hub/tmux'
 
 const tmp = () => mkdtempSync(join(tmpdir(), 'mmhub-test-'))
+
+describe('readJson', () => {
+  test('a missing file gives the fallback, invalid JSON is moved aside', () => {
+    const dir = tmp()
+    expect(readJson(join(dir, 'a.json'), () => 'none')).toBe('none')
+    expect(readJson(join(dir, 'a.json', 'b.json'), () => 'none')).toBe('none')
+    writeFileSync(join(dir, 'a.json'), '{"half":')
+    expect(readJson(join(dir, 'a.json'), () => 'none')).toBe('none')
+    expect(readdirSync(dir)).toEqual([expect.stringMatching(/^a\.json\.corrupt-\d+$/)])
+  })
+
+  test('a file that can\'t be read stays where it is, and is never taken for empty', () => {
+    const dir = tmp()
+    const file = join(dir, 'a.json')
+    writeFileSync(file, '{"kept":true}')
+    chmodSync(file, 0)
+    expect(() => readJson(file, () => ({}))).toThrow(Unreadable)
+    expect(() => readJson(file, () => ({}))).toThrow(`can't read ${file} (EACCES)`)
+    expect(peekJson<unknown>(file, () => 'none')).toBe('none')
+    expect(readdirSync(dir)).toEqual(['a.json'])
+    chmodSync(file, 0o600)
+    expect(peekJson<unknown>(file, () => 'none')).toEqual({ kept: true })
+  })
+
+  test('nobody becomes an owner, or stops being one, because access.json can\'t be read', () => {
+    const file = join(tmp(), 'access.json')
+    writeFileSync(file, JSON.stringify({ ...defaultAccess(), allowFrom: ['U1'] }))
+    chmodSync(file, 0)
+    expect(() => new AccessStore(file).load()).toThrow(Unreadable)
+    chmodSync(file, 0o600)
+    expect(new AccessStore(file).load().allowFrom).toEqual(['U1'])
+  })
+})
 
 describe('launch argv', () => {
   const base: Omit<LaunchSpec, 'role'> = {

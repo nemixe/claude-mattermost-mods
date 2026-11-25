@@ -189,4 +189,12 @@ bare PATH). Run `echo $PATH` in the user's login shell context, and write it as
 
 ## `start` / `stop` / `logs`
 
-Run `mmhub start`, `mmhub stop`, or `mmhub logs -n 80` and report.
+Run `mmhub start`, `mmhub stop`, or `mmhub logs -n 80` and report. With the launchd
+agent installed (macOS), `mmhub start` goes through launchd; don't start the hub any
+other way (`bun src/hub/main.ts`, `--no-agent`): macOS may keep such a hub out of
+external disks. If a log or `mmhub status` says the hub `can't read` a workspace with
+EPERM, run `mmhub stop`, then `mmhub start`. If it still can't and there is no agent,
+suggest `mmhub agent install`; if there is one, the user allows `bun` access in System
+Settings → Privacy & Security (Full Disk Access). Never move or rewrite the files it
+can't read. `mmhub agent install` refuses to replace a launcher of the user's own: pass
+`--force` only if they ask for that.

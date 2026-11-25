@@ -505,14 +505,14 @@ notes, `.claude/settings.json` permission rules, `.mcp.json` servers or any othe
 ## CLI
 
 ```
-mmhub start | stop | status [--json] | logs [-n N] [-f] | doctor | reload
+mmhub start [--no-agent] | stop | status [--json] | logs [-n N] [-f] | doctor | reload
 mmhub session new <workspace> [--json]                 # a direct session in the workspace folder
 mmhub session <stop|wake|pin|unpin> <key> [--json]     # {"ok":bool,"message":string}
 mmhub session restart <key|all|workers|routers> [--now] # after the current turn, or right away
 mmhub ws list | create <name> [desc] | bind <ws> <channel-id> | unbind <channel-id> | show <name> | template
 mmhub repo add <ws> <path|git-url> [--name n] | rm <ws> <name>
 mmhub lookup user <username> | lookup channel <team> <channel>
-mmhub agent install | uninstall                         # macOS: start the hub at login (launchd)
+mmhub agent install [--force] | uninstall               # macOS: start the hub at login (launchd)
 mmhub laya install [--port N] [--device D] [--english-only] | status | restart | logs | use ollama|serve | uninstall
 mmhub provider list | add <name> <kind> [--env K=V]… | login <name> | secret <name> <VAR> | check <name>
 mmhub provider use <ws|--hub> <name>… | use <ws> --inherit | reset <name> | rm <name> [--purge]
@@ -626,6 +626,15 @@ checks the transcript first and falls back to a fresh session (the router is tol
 re-read the thread). `mmhub stop` leaves sessions running; the next `mmhub start`
 adopts them.
 
+**Unreadable files.** A workspace whose `workspace.json` is there but can't be read (an
+external disk macOS keeps the hub out of, wrong permissions, a disk error) is left
+alone: its file is never moved or written over, its sessions don't start, and running
+ones aren't restarted, cleaned up or moved to another provider on settings the hub
+doesn't know. Messages for it stay queued, its threads get one ⚠️ post, and the sessions
+start by themselves once the hub can read it (checked every 60 s). `mmhub status` and
+the panel show which, and why. Only a file that isn't valid JSON is moved aside
+(`<file>.corrupt-<time>`).
+
 **Cleanup.** A worker with no work for `cleanupHours` (24 by default) gets a cleanup
 job from the hub, and its own session does it: it stops the dev servers, watchers and
 background jobs it left running (freeing their ports), removes the Docker containers it
@@ -677,6 +686,24 @@ the background would die with its process, so the restart also waits for that to
 (new work goes in meanwhile, since it may take long). `--now` / `!restart <id> now` / **Restart now**
 interrupts it instead; the cut-off work is re-delivered (background work just stops). `restart all|workers|routers`
 does every live session (e.g. after editing `config.json` and `mmhub reload`).
+
+### The launchd agent (macOS)
+
+`mmhub agent install` writes `~/Library/LaunchAgents/com.claude.mmhub.plist`: launchd
+starts the hub at login and restarts it when it crashes. From then on `mmhub start` (and
+the panel's **Start hub**) starts it through launchd too, whichever terminal or SSH
+session you run it in, and `mmhub stop` stops it until the next start or login.
+
+That matters for `workspacesDir` on an **external disk**, or in Documents, Desktop or
+Downloads: macOS decides by who started a process whether it may read those. A hub
+started from a terminal or over SSH can be refused (`EPERM`) where launchd's isn't.
+`mmhub start --no-agent` starts one from your shell anyway.
+
+You can point the agent at a launcher of your own (change `ProgramArguments`): `mmhub
+start` uses it as it is, and `mmhub agent install` refuses to replace it unless you pass
+`--force` (the old plist is then kept as `….plist.old`). An agent whose environment names
+another state dir (`MMHUB_STATE_DIR`, `CLAUDE_CONFIG_DIR`) is another hub's: `mmhub start`
+leaves it alone.
 
 ## Development
 

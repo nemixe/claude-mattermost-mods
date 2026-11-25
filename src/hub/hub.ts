@@ -12,7 +12,7 @@ import type { ClientMsg, HookEvent, HubMsg, Role } from '../shared/ipc'
 import type { Paths } from '../shared/paths'
 import { ROOT } from '../shared/paths'
 import type { HubSnapshot, CloseReason, ProviderLink, WorkspaceProvider } from '../shared/snapshot'
-import { chunk, errMsg, fmtAge, log, MAX_POST_CHARS, safeName, shortId } from '../shared/util'
+import { chunk, errMsg, fmtAge, log, logUnreadable, MAX_POST_CHARS, safeName, shortId, Unreadable } from '../shared/util'
 import { AccessStore, issuePairingCode, ownerNeedsBotCheck, pruneExpired } from './access'
 import { authStatusInTmux, type AuthStatus } from './authcheck'
 import { BackgroundTasks, type BackgroundTask } from './background'
@@ -73,6 +73,8 @@ type Live = {
   lastDeliveredAt: number
   lastHookAt: number
   attached: number
+  /** Couldn't start because its workspace can't be read (its threads were told). */
+  blocked?: boolean
   /** A failed --resume already fell back to a fresh session once. */
   triedFresh: boolean
   /** Bridge gone since (watchdog). */
@@ -188,15 +190,34 @@ export class Hub {
     return l
   }
 
-  reloadConfig(): void {
-    this.cfg = loadConfig(this.p.config)
+  /** Re-read config.json. Returns why it couldn't be (the settings from before stay). */
+  reloadConfig(): string | undefined {
+    try {
+      this.cfg = loadConfig(this.p.config)
+    } catch (err) {
+      if (!(err instanceof Unreadable)) throw err
+      logUnreadable(err)
+      return err.message
+    }
     try {
       ensureTemplate(this.cfg)
     } catch {}
+    return undefined
   }
 
   ws(name: string): Workspace | undefined {
     return loadWorkspace(this.cfg, name)
+  }
+
+  /** The workspaces on disk; none (logged) while their folder can't be read. */
+  workspaces(): Workspace[] {
+    try {
+      return listWorkspaces(this.cfg)
+    } catch (err) {
+      if (!(err instanceof Unreadable)) throw err
+      logUnreadable(err)
+      return []
+    }
   }
 
   patch(key: string, p: Parameters<Store['patchSession']>[1]): void {
@@ -212,6 +233,7 @@ export class Hub {
   /** Hours a worker may go without work before its cleanup job (0 = never). */
   cleanupHoursFor(workspace: string): number {
     const w = this.ws(workspace)
+    if (w?.unreadable) return 0 // it may say never
     return w ? effective(this.cfg, w).cleanupHours : this.cfg.cleanupHours
   }
 
@@ -494,7 +516,7 @@ export class Hub {
       if (s.status !== 'idle' && s.status !== 'busy') continue
       if (this.liveOf(s.key).starting || this.restartPending(s.key)) continue
       const w = this.ws(s.workspace)
-      if (!w) continue
+      if (!w || w.unreadable) continue // which chain is its own isn't known
       const a = this.activeProvider(w, defs)
       const from = this.providerOf(s.key)
       if (!a.healthy || a.unusable || a.name === from) continue
@@ -503,7 +525,8 @@ export class Hub {
       await this.restart(s.key)
       moved++
     }
-    for (const w of listWorkspaces(this.cfg)) {
+    for (const w of this.workspaces()) {
+      if (w.unreadable) continue
       const a = this.activeProvider(w, defs).name
       const before = this.activeSeen.get(w.name)
       if (before !== undefined && before !== a) log('provider', `workspace ${w.name}: ${before} → ${a}`)
@@ -619,6 +642,8 @@ export class Hub {
       this.patch(key, { status: 'idle', closedAt: undefined, closeReason: undefined })
       return 'live'
     }
+    // Don't close another session for one that can't start.
+    if (await this.workspaceBlocked(key)) return 'failed'
     if (this.liveCount(row.role) >= this.cap(row.role)) {
       const views = this.store.sessions({ role: row.role }).filter(s => isLive(s.status)).map(s => this.reapView(s))
       const victim = pickEvictee(views, row.role, [key])
@@ -631,6 +656,27 @@ export class Hub {
     return (await this.startSession(key)) ? 'live' : 'failed'
   }
 
+  /**
+   * Whether a session can't start because the hub can't read its workspace (a disk
+   * macOS keeps this process from, say). Its threads are told once; what it has
+   * waiting stays queued, and pump tries again until it can. Call on the chain.
+   */
+  private async workspaceBlocked(key: string): Promise<boolean> {
+    const l = this.liveOf(key)
+    const w = this.ws(this.store.session(key)?.workspace ?? '')
+    if (!w?.unreadable) {
+      l.blocked = false
+      return false
+    }
+    if (!l.blocked) {
+      l.blocked = true
+      log('lifecycle', `${key}: not started: ${w.unreadable}`)
+      const msg = `⚠️ **${this.label(key)}** can't start: the hub can't read workspace **${w.name}** right now (\`mmhub logs\` says why). What it was sent is kept, and it starts by itself once the hub can.`
+      for (const t of this.threadsNeeding(key)) await this.notice(t, msg)
+    }
+    return true
+  }
+
   /** Spawn the tmux session; dialogs are handled by watchStartup beside the chain. */
   private async startSession(key: string, forceFresh = false): Promise<boolean> {
     const row = this.store.session(key)!
@@ -640,6 +686,7 @@ export class Hub {
       this.patch(key, { status: 'failed', closeReason: 'failed', closedAt: Date.now() })
       return false
     }
+    if (await this.workspaceBlocked(key)) return false
     this.reloadConfig()
     const l = this.liveOf(key)
 
@@ -964,6 +1011,8 @@ export class Hub {
       return { ok: true, message: `${label} is ${row.status} with the current settings already`, state: 'unchanged' }
     }
     if (row.status === 'closing') return { ok: false, message: `${label} is closing`, state: 'failed' }
+    const unreadable = this.ws(row.workspace)?.unreadable
+    if (unreadable) return { ok: false, message: `left ${label} running: it couldn't start again, the hub ${unreadable}`, state: 'failed' }
     if (now) {
       const cut = this.inFlight(key)
       await this.restartNow(key, 'asked to restart now')
@@ -1010,6 +1059,7 @@ export class Hub {
   async newDirectSession(name: string): Promise<{ ok: boolean; message: string; key?: string }> {
     const w = this.ws(name)
     if (!w) return { ok: false, message: `no workspace ${name.slice(0, 40)}` }
+    if (w.unreadable) return { ok: false, message: `the hub ${w.unreadable}` }
     const n = Math.max(0, ...this.store.workers(w.name).map(x => Number(/^Direct session (\d+)$/.exec(x.title)?.[1] ?? 0))) + 1
     const title = `Direct session ${n}`
     const key = this.createWorker({ workspace: w, title, summary: '', direct: true })
@@ -1565,7 +1615,9 @@ export class Hub {
   async keepLaya(): Promise<void> {
     if (!this.cfg.laya.serve) return
     const sp = servePaths(this.p)
-    const wanted = listWorkspaces(this.cfg).some(w => effective(this.cfg, w).trigger === 'laya')
+    const all = this.workspaces()
+    if (all.some(w => w.unreadable)) return // what they want isn't known: leave it as it is
+    const wanted = all.some(w => effective(this.cfg, w).trigger === 'laya')
     try {
       const r = await keepServing({ tmux: this.tmux, laya: this.cfg.laya, sp, wanted, k: this.layaKeeper, now: Date.now() })
       if (r === 'started') void warmUp(this.cfg.laya, serveKey(sp)).then(m => log('trigger', `laya-serve: ${m}`))
@@ -1731,7 +1783,7 @@ export class Hub {
 
   snapshot(): HubSnapshot {
     const sessions = this.store.sessions()
-    const workspaces = listWorkspaces(this.cfg)
+    const workspaces = this.workspaces()
     const workers = workspaces.flatMap(w => this.store.workers(w.name))
     const defs = this.providerDefs()
     return buildSnapshot({

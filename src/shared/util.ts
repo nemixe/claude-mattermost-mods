@@ -60,13 +60,73 @@ export function assertSendable(file: string, stateDir: string): void {
   }
 }
 
+/** Why the system refused a file operation; on a Mac, EPERM is nearly always privacy protection (external disks, Documents…). */
+export function denied(err: unknown): string {
+  const code = (err as NodeJS.ErrnoException | undefined)?.code
+  if (code !== 'EPERM') return code ?? errMsg(err)
+  return process.platform === 'darwin' ? 'EPERM: macOS privacy protection keeps this process out, most likely' : 'EPERM: not permitted'
+}
+
+/**
+ * A file or folder that is there but can't be read. What it holds may be fine,
+ * so it is not to be taken for empty: whoever changes such a file must fail.
+ */
+export class Unreadable extends Error {
+  constructor(readonly path: string, readonly why: string) {
+    super(`can't read ${path} (${why})`)
+  }
+}
+
+const reported = new Set<string>()
+
+/** Log that a path can't be read: once, until readable() says it could be again. */
+export function logUnreadable(err: Unreadable): void {
+  if (reported.has(err.path)) return
+  reported.add(err.path)
+  log('state', err.message)
+}
+
+export function readable(path: string): void {
+  if (reported.delete(path)) log('state', `can read ${path} again`)
+}
+
+/**
+ * A JSON file, or the fallback when there is none. One that isn't valid JSON is
+ * moved aside. Throws Unreadable when it can't be read at all (permissions, a
+ * disk error): then it is left where it is.
+ */
 export function readJson<T>(path: string, fallback: () => T): T {
+  let text: string
   try {
-    return JSON.parse(readFileSync(path, 'utf8')) as T
+    text = readFileSync(path, 'utf8')
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return fallback()
-    try { renameSync(path, `${path}.corrupt-${Date.now()}`) } catch {}
-    log('state', `${path} is corrupt, moved aside`)
+    const code = (err as NodeJS.ErrnoException).code
+    if (code === 'ENOENT' || code === 'ENOTDIR') return fallback()
+    throw new Unreadable(path, denied(err))
+  }
+  try {
+    return JSON.parse(text) as T
+  } catch {
+    const aside = `${path}.corrupt-${Date.now()}`
+    try {
+      renameSync(path, aside)
+      log('state', `${path} is not valid JSON: moved to ${aside}`)
+    } catch (err) {
+      log('state', `${path} is not valid JSON, and could not be moved aside: ${errMsg(err)}`)
+    }
+    return fallback()
+  }
+}
+
+/** readJson for files only looked at: the fallback (logged once) when it can't be read. Never to change the file with. */
+export function peekJson<T>(path: string, fallback: () => T): T {
+  try {
+    const v = readJson(path, fallback)
+    readable(path)
+    return v
+  } catch (err) {
+    if (!(err instanceof Unreadable)) throw err
+    logUnreadable(err)
     return fallback()
   }
 }

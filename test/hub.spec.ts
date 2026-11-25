@@ -7,7 +7,7 @@
 // opens, so a start takes ~1.5 s (the shepherd's polling).
 
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { dirname, join } from 'path'
 import type { HubMsg } from '../src/shared/ipc'
@@ -168,6 +168,72 @@ async function hook(hub: Hub, key: string, event: 'Stop' | 'StopFailure' | 'Sess
   hub.liveOf(key).lastDeliveredAt = 0
   await hub.enqueue(() => hub.applyHook({ t: 'hook', key, event, ...extra }))
 }
+
+describe('a workspace the hub can\'t read', () => {
+  /** As on a disk macOS keeps the hub out of; returns a way to let it in again. */
+  function lock(w: Workspace) {
+    const file = join(w.dir, 'workspace.json')
+    chmodSync(file, 0)
+    return () => chmodSync(file, 0o644)
+  }
+
+  test('its sessions wait, their threads are told once, and they start once it can', async () => {
+    const { hub, tmux, posts, w } = setup()
+    const unlock = lock(w)
+    const { key, taskId } = worker(hub, w)
+    expect(await hub.enqueue(() => hub.ensureStarted(key))).toBe('failed')
+    await hub.enqueue(() => hub.pump())
+    await hub.enqueue(() => hub.pump())
+    expect(tmux.launches.length).toBe(0)
+    expect(posts.map(x => x.message)).toEqual([expect.stringContaining("can't start: the hub can't read workspace **demo**")])
+    expect(hub.store.session(key)!.status).not.toBe('failed')
+    expect(hub.store.task(taskId)!.state).toBe('queued')
+    unlock()
+    await hub.enqueue(() => hub.pump())
+    const b = await connect(hub, tmux, key, 1)
+    await until('the task', () => b.got.length === 1)
+    expect(b.got[0]!.content).toContain('fix the login bug')
+  })
+
+  test('a running session is not closed for a restart, a cleanup or another session that can\'t start', async () => {
+    const { hub, tmux, w } = setup({ maxLiveWorkers: 1, cleanupHours: 1 })
+    const { key } = worker(hub, w)
+    await hub.enqueue(() => hub.ensureStarted(key))
+    await connect(hub, tmux, key, 1)
+    await hook(hub, key, 'Stop')
+    lock(w)
+    const r = await hub.enqueue(() => hub.restart(key, true))
+    expect(r).toMatchObject({ ok: false, state: 'failed' })
+    expect(r.message).toContain("can't read")
+    const other = worker(hub, w)
+    expect(await hub.enqueue(() => hub.ensureStarted(other.key))).toBe('failed')
+    hub.store.deleteWorker(other.key)
+    await hub.enqueue(() => hub.cleanupDue(Date.now() + 100 * 3_600_000))
+    expect(hub.queued(key) + hub.inFlight(key)).toBe(0)
+    expect(hub.store.session(key)!.status).toBe('idle')
+    expect(tmux.launches.length).toBe(1)
+  })
+
+  test('the status says so, also when the whole folder can\'t be read', () => {
+    const { hub, w } = setup()
+    const unlock = lock(w)
+    expect(hub.snapshot().workspaces[0]!.unreadable).toContain("can't read")
+    unlock()
+    chmodSync(join(w.dir, '..'), 0o300)
+    expect(hub.snapshot().workspaces).toEqual([])
+    chmodSync(join(w.dir, '..'), 0o755)
+    expect(hub.snapshot().workspaces[0]!.unreadable).toBeUndefined()
+  })
+
+  test('settings that can\'t be read stay as they were', () => {
+    const { hub, p } = setup({ maxLiveWorkers: 2 })
+    chmodSync(p.config, 0)
+    expect(hub.reloadConfig()).toContain("can't read")
+    expect(hub.cfg.maxLiveWorkers).toBe(2)
+    chmodSync(p.config, 0o600)
+    expect(hub.reloadConfig()).toBeUndefined()
+  })
+})
 
 describe('interrupted work resumes', () => {
   test('an API error re-delivers the task after a backoff, with a note', async () => {
