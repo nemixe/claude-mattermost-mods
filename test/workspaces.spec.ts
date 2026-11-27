@@ -167,14 +167,32 @@ describe('router persona', () => {
     expect(routerPersona(cfg, w).source).toBe('built-in (project manager)') // an empty file doesn't count
     // Resumed sessions keep their first system prompt, so the context carries the current persona too.
     const ctx = routerContext(w, { threadId: 'T', permalink: 'http://pl/T', workers: [], persona: 'Be terse.', reports: 'router' })
-    expect(ctx).toContain('it replaces any earlier one):\nBe terse.')
+    expect(ctx).toContain('it replaces the one in your system prompt):\nBe terse.')
+  })
+  test("a workspace's CLAUDE.md comes before the hub's rules on how routers talk; the built-in persona doesn't assume or recap", () => {
+    const { cfg } = setup()
+    const w = createWorkspace(cfg, 'demo')
+    const ctx = routerContext(w, { threadId: 'T', permalink: 'http://pl/T', workers: [], persona: 'p', reports: 'router' })
+    const prompt = routerPrompt('demo', DEFAULT_ROUTER_PERSONA)
+    for (const text of [ctx, prompt]) {
+      expect(text).toContain("Where the workspace's CLAUDE.md says otherwise about how you talk or what goes in a post (tone, length, format, how much detail, when and how to ask), follow CLAUDE.md")
+      expect(text).not.toMatch(/replaces? any(thing)? earlier/)
+    }
+    expect(DEFAULT_ROUTER_PERSONA).toContain('one question per message')
+    expect(DEFAULT_ROUTER_PERSONA).not.toMatch(/assumption|one or two|Close the loop/)
+    // A worker's report answers the person's request; length is a ceiling.
+    expect(ctx).toContain('to a question, the answer itself, not a summary of what the worker did')
+    expect(ctx).not.toContain('the outcome in a few lines')
+    expect(ctx).toContain('Five lines is a ceiling, not a target')
+    expect(workerContext(w, { worker: { key: 'w-1', workspace: 'demo', title: 't', summary: '', threads: [], repos: {} } as never, reports: 'router' }))
+      .toContain('How you report (the current rules; they replace the version in your system prompt):')
   })
   test('what routers post and how workers report ride in the context, per reporting mode', () => {
     const { cfg } = setup()
     const w = createWorkspace(cfg, 'demo')
     const base = { threadId: 'T', permalink: 'http://pl/T', workers: [], persona: 'p' }
     const viaRouter = routerContext(w, { ...base, reports: 'router' })
-    expect(viaRouter).toContain('they replace anything earlier about what to post or how workers report')
+    expect(viaRouter).toContain('What you post in the thread (the current rules; they replace the version in your system prompt.')
     expect(viaRouter).toContain("Don't narrate the process")
     expect(viaRouter).toContain('kind="worker_report"')
     expect(viaRouter).not.toContain('Workers post their results')

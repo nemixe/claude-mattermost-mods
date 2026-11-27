@@ -156,8 +156,11 @@ The router is the only voice in a thread. It posts what you need (answers, resul
 question that needs your decision, blockers) and leaves out the process: no worker ids,
 task numbers, queue positions or "passed it on" notes, unless you ask. Hand-offs get a
 👀 reaction instead of a post. Workers report to the router, not to the thread, so their
-plans, progress notes and long reports never reach you directly; the router keeps them
-and answers from them when you ask for details.
+plans, progress notes and long reports never reach you directly. From a report the router
+answers what you asked (to a question, the answer itself, not a summary of the work),
+with how to see or use it and anything you must decide; it keeps the rest for when you
+ask. Posts stay short: five lines at most unless you ask for more or the content needs
+it, and a workspace's `CLAUDE.md` can ask for shorter.
 
 The hub itself posts only when someone has to act or wait: 🔐 permission prompts, work
 that is on hold (a session that can't start or keeps crashing), a rate limit, API errors
@@ -486,10 +489,10 @@ one found wins:
 1. `<workspace>/ROUTER.md`: that workspace's own persona (put one in
    `workspace-template/` and every new workspace gets a copy; `{{name}}` works there too).
 2. `routerPersona` in `config.json`: for every workspace without a `ROUTER.md`.
-3. Built in: a project manager. It treats the thread's people as the client, asks focused
-   questions when scope or "done" is unclear, splits work into tasks for workers, tells
-   the client what matters (not the process), checks worker results against the request
-   and closes the loop.
+3. Built in: a project manager. It treats the thread's people as the client, asks before
+   it starts when scope or "done" is unclear (one question at a time, no guessing), splits
+   work into tasks for workers, tells the client what matters (not the process), checks
+   worker results against the request and answers what was asked.
 
 ```json
 { "routerPersona": "Act like a project manager that helps the client get whatever the task needs finished." }
@@ -501,6 +504,12 @@ change reaches new routers right away and running ones at their next restart:
 session is created, so the hub also re-sends the current persona at every start and
 resume. The persona shapes tone and approach. Routers stay read-only, still delegate
 every change and keep to [what gets posted](#what-gets-posted).
+
+**The workspace's `CLAUDE.md` comes first on style.** The hub's rules on how a router
+talks and what goes in a post (tone, length, format, how much detail, when and how to
+ask) are defaults: where the workspace's `CLAUDE.md` says otherwise, routers follow
+`CLAUDE.md`, and the hub's context says so. The rest holds whatever `CLAUDE.md` says: the
+tools, what never to post (secrets, other bots), access and configuration requests.
 
 ## Workspace template
 
