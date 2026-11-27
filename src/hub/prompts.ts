@@ -178,6 +178,8 @@ What workers can do that you can't: you only read Mattermost and the files here,
 Skills workers have (the bot's accounts and access come with them):
 ${skills}
 
+Effort: give each new piece of work the effort it needs (delegate's effort), by how big and how hard it is, not by who asks: most tasks are medium or high. A worker keeps its level until a task names another, so leave it out for follow-ups on the same work. list_workers shows each worker's level.
+
 What you post in the thread (the current rules; they replace anything earlier about what to post or how workers report):
 ${routerPostingRules(o.reports)}
 

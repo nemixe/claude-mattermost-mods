@@ -1,0 +1,4 @@
+{
+  "//": "The mod's own type-check: tsc -p session-mod/hooks. ../.claude-plugin/types/ is laid by Claude Code when a session loads this folder (the hub's workers do, with --plugin-dir).",
+  "extends": "../.claude-plugin/types/tsconfig.json"
+}

@@ -14,6 +14,7 @@
  */
 
 import { Database } from 'bun:sqlite'
+import type { Effort } from '../shared/ipc'
 import type { CloseReason, SessionStatus } from '../shared/snapshot'
 
 export type Role = 'router' | 'worker'
@@ -101,6 +102,8 @@ export type TaskRow = {
   createdAt: number
   deliveredAt?: number
   endedAt?: number
+  /** The effort the router chose for it (the worker keeps it for later tasks that name none). */
+  effort?: Effort
 }
 
 const SCHEMA = `
@@ -121,7 +124,7 @@ CREATE TABLE IF NOT EXISTS workers (
 );
 CREATE TABLE IF NOT EXISTS tasks (
   id INTEGER PRIMARY KEY AUTOINCREMENT, worker_key TEXT NOT NULL, thread_id TEXT NOT NULL, channel_id TEXT NOT NULL,
-  text TEXT NOT NULL, state TEXT NOT NULL, created_at INTEGER NOT NULL, delivered_at INTEGER, ended_at INTEGER
+  text TEXT NOT NULL, state TEXT NOT NULL, created_at INTEGER NOT NULL, delivered_at INTEGER, ended_at INTEGER, effort TEXT
 );
 CREATE INDEX IF NOT EXISTS tasks_worker ON tasks(worker_key, state);
 CREATE TABLE IF NOT EXISTS posts (
@@ -289,6 +292,7 @@ function toTask(r: Raw): TaskRow {
     id: Number(r.id), workerKey: String(r.worker_key), threadId: String(r.thread_id), channelId: String(r.channel_id),
     text: String(r.text), state: r.state as TaskState, createdAt: Number(r.created_at),
     deliveredAt: n(r.delivered_at), endedAt: n(r.ended_at),
+    ...(r.effort ? { effort: String(r.effort) as Effort } : {}),
   }
 }
 
@@ -318,6 +322,7 @@ export class Store {
     // Columns added since a table was first made (CREATE TABLE IF NOT EXISTS leaves an existing table as it was).
     const has = (table: string, col: string) => (this.db.query(`PRAGMA table_info(${table})`).all() as { name: string }[]).some(c => c.name === col)
     if (!has('workers', 'direct')) this.db.exec('ALTER TABLE workers ADD COLUMN direct INTEGER NOT NULL DEFAULT 0')
+    if (!has('tasks', 'effort')) this.db.exec('ALTER TABLE tasks ADD COLUMN effort TEXT')
   }
 
   // ---------------------------------------------------------------- sessions
@@ -470,8 +475,8 @@ export class Store {
   }
 
   insertTask(t: Omit<TaskRow, 'id'>): number {
-    const r = this.db.query('INSERT INTO tasks (worker_key, thread_id, channel_id, text, state, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(t.workerKey, t.threadId, t.channelId, t.text, t.state, t.createdAt)
+    const r = this.db.query('INSERT INTO tasks (worker_key, thread_id, channel_id, text, state, created_at, effort) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(t.workerKey, t.threadId, t.channelId, t.text, t.state, t.createdAt, t.effort ?? null)
     return Number(r.lastInsertRowid)
   }
 

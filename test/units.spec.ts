@@ -74,6 +74,13 @@ describe('launch argv', () => {
     expect(addedDirs(a, '/cwd')).toEqual(['/ws/knowledge', '/ws/in box', '/a', '/cwd/b', '/c'])
     expect(addedDirs(claudeArgs({ ...base, role: 'router', addDirs: [], extraArgs: [] }), '/cwd')).toEqual([])
   })
+  test('workers load the mod that sets each task\'s effort, from the file it reads', () => {
+    const a = claudeArgs({ ...base, role: 'worker', workerMod: '/repo/session-mod', extraArgs: [] })
+    expect(a.slice(a.indexOf('--plugin-dir'), a.indexOf('--plugin-dir') + 2)).toEqual(['--plugin-dir', '/repo/session-mod'])
+    expect(claudeArgs({ ...base, role: 'router' })).not.toContain('--plugin-dir')
+    expect(sessionFiles(paths('/state'), 'w-1').effort).toBe('/state/sessions/w-1/effort')
+    expect(readFileSync(join(import.meta.dir, '..', 'session-mod', 'hooks', 'register.ts'), 'utf8')).toContain('/sessions/${key}/effort')
+  })
   test('names and paths', () => {
     expect(tmuxName('w-ab12')).toBe('mmw-ab12')
     expect(transcriptPath('/Users/x/ws/.worktrees/w-1', 'ID', '/cfg')).toBe('/cfg/projects/-Users-x-ws--worktrees-w-1/ID.jsonl')

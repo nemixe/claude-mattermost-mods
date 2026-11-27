@@ -73,6 +73,13 @@ the `/mm` panel. The CLI is `bun ~/claude-mattermost-mods/bin/mmhub` (alias it t
   the worker is done, the router posts the outcome (what changed, where, how to use it)
   and keeps the details for when you ask.
 - Replies in the thread need no mention. Follow-ups reach the same worker.
+- The router gives each new piece of work an effort level, by how big and how hard it
+  is: `low` for a lookup or a one-line change, `medium` or `high` for most work, `xhigh`
+  for a hard bug or a design, `max` only when `xhigh` fell short or you ask for the
+  deepest work. Higher thinks longer, takes longer and costs more. Follow-ups keep the
+  worker's level; ask for another (`@claude look deeper`) and the router passes it on.
+  `!workers` and the router's `list_workers` show each worker's level
+  ([Effort per task](#effort-per-task)).
 - `@claude recap the issues reported in <link to a thread> as a table`, or a question
   about a channel or past discussion → the bot reads Mattermost for you: a thread from
   its link (or any post's), a channel's latest posts, a search, the channels it is in.
@@ -604,9 +611,10 @@ inside the hub's tmux (`tmux -L mmhub new-session -s mmhub-login claude`, then
 | | router | worker | direct session |
 | --- | --- | --- | --- |
 | cwd | `<ws>` | `<ws>/.worktrees/<id>` (still loads `<ws>/CLAUDE.md`) | `<ws>` |
-| model | `routerModel` + `--effort low` | `workerModel` | `workerModel` |
+| model | `routerModel` + `--effort low` | `workerModel`, at the effort its router chose for the task | `workerModel` |
 | tools | `--tools Read,Grep,Glob`, `--permission-mode dontAsk` | default tools, `workerPermissionMode` | same as a worker |
 | extra dirs | repos outside the workspace | `knowledge/`, `inbox/` | repos outside the workspace |
+| mod | none | `--plugin-dir session-mod` ([Effort per task](#effort-per-task)) | same as a worker |
 | always | `--mcp-config` (bridge `mmhub` + workspace `.mcp.json`) `--strict-mcp-config`, generated `--settings` (hooks + workspace settings), `--setting-sources project,local`, `--append-system-prompt-file`, `--dangerously-load-development-channels server:mmhub` | same | same |
 
 **Direct sessions.** `mmhub session new <ws>` opens a session in the hub's tmux for you to
@@ -622,6 +630,32 @@ the Claude Code session you already have open instead, use **Select** in the pan
 User-level plugins and settings don't load in spawned sessions (`--setting-sources
 project,local`), so another channel plugin can't grab them. Spike findings behind these
 choices: [docs/SPIKE.md](docs/SPIKE.md).
+
+### Effort per task
+
+`delegate` takes an `effort` (`low`, `medium`, `high`, `xhigh`, `max`), and the worker runs
+the task at that level without restarting. When the hub sends the task it writes the
+level to `<state>/sessions/<worker id>/effort`; the worker's mod (`session-mod/`, loaded
+with `--plugin-dir`) reads that file at each model request and sets the request's effort.
+Its subagents keep their own. A task that names no level keeps the worker's current one,
+so a follow-up doesn't change it; a queued task changes it only when it is sent, not while
+the task before it runs. A cleanup job puts the worker back at its default, as does a
+worker never given a level: `workerModel`'s own, or `--effort` in `workerArgs`.
+
+- What a change of level costs depends on the worker's model. Claude Opus 5.5 and
+  Sonnet 5.5 (what `opus` and `sonnet` mean in Claude Code now) take effort per message:
+  Claude Code states the new level after the conversation, and the prompt cache holds
+  (measured on Opus 5.5: 17 tokens written after a change). On older models, such as
+  Opus 4.8, the next request writes the conversation to the cache again, once.
+  `CLAUDE_CODE_MODEL_CAPABILITIES=per_turn_effort` isn't needed: Claude Code already
+  does this where the model supports it, and the API refuses it where it doesn't.
+- Not `/effort`: in an interactive session it also saves the level as your default for
+  new sessions (`effortLevel` in `~/.claude/settings.json`), and Claude Code doesn't
+  re-read `effortLevel` from a settings file mid-session.
+- A model without effort levels ignores it.
+- Routers learn about `effort` from their context, which a router gets at each start or
+  resume: one running from before an update uses it after its next restart
+  (`!restart routers`).
 
 ### Code Mode
 
@@ -747,7 +781,7 @@ leaves it alone.
 ```bash
 bun test            # hub tests in test/ (inbound table, lifecycle, providers, hub, …)
 bun run typecheck
-claude plugin test . # the panel mod's tests (hooks/*.test.tsx); tsc -p hooks type-checks it
+claude plugin test . # the mods' tests: the panel's (hooks/*.test.tsx) and the workers' effort mod's (session-mod/); tsc -p hooks type-checks the panel
 bun scripts/e2e.ts  # real hub + real claude sessions against an in-memory Mattermost
-claude plugin validate .
+claude plugin validate . && claude plugin validate session-mod
 ```

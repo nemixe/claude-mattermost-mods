@@ -1,6 +1,6 @@
 /** Tool definitions the bridge advertises, per role (served as mcp__mmhub__<name>). */
 
-import type { Role } from '../shared/ipc'
+import { EFFORTS, type Role } from '../shared/ipc'
 
 /** Where workers' reports go: to the thread's router (default) or straight into the thread. */
 export type Reports = 'router' | 'thread'
@@ -179,6 +179,11 @@ export function toolsFor(role: Role, reports: Reports = 'router', direct = false
           new_worker: obj({ title: s('Short title, e.g. "Login flow fixes"'), summary: s('One line: what this worker owns') }, ['title', 'summary']),
           task: s('Self-contained task: goal, context, constraints, what "done" means'),
           message_ids: { type: 'array', items: { type: 'string' }, description: "Ids of the person's messages this task comes from (their own words are passed on)" },
+          effort: {
+            type: 'string',
+            enum: [...EFFORTS],
+            description: 'How hard the worker thinks, and so roughly how long it takes: low — a lookup, a quick check, a one-line change (minutes); medium — a routine change in code it knows; high — a feature across files, a bug to track down, a careful review; xhigh — a hard bug, a design, a risky migration; max — only when xhigh fell short, or the person asks for the deepest work. Higher is slower and costs more. The worker keeps a level until a task names another: leave it out for a follow-up on the same work.',
+          },
         }, ['task']),
       },
     ]

@@ -1,0 +1,5 @@
+{
+  "name": "mmhub-worker",
+  "version": "0.1.0",
+  "description": "Loaded into Mattermost hub workers: each task runs at the effort its router chose"
+}

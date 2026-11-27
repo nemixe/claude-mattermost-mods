@@ -171,6 +171,67 @@ async function hook(hub: Hub, key: string, event: 'Stop' | 'StopFailure' | 'Sess
   await hub.enqueue(() => hub.applyHook({ t: 'hook', key, event, ...extra }))
 }
 
+describe('the effort a router chooses', () => {
+  const effortFile = (p: ReturnType<typeof paths>, key: string) => join(p.sessions, key, 'effort')
+
+  test('a task goes at its level; later ones that name none keep it; one waiting its turn changes it when it is sent', async () => {
+    const { hub, tmux, w, p } = setup()
+    const rkey = hub.createRouter({ threadId: 'T2', channelId: 'C1', workspace: w, label: 'thread two' })
+    const first = JSON.parse(await handleCall(hub, rkey, 'delegate', { new_worker: { title: 'Fixer', summary: 'fixes things' }, task: 'fix the login bug', effort: 'high' }))
+    const key = first.worker_id as string
+    expect(first.effort).toBe('high')
+    // Workers load the mod that reads the level; routers don't need it.
+    const argv = tmux.launches[0]!.argv
+    expect(argv[argv.indexOf('--plugin-dir') + 1]).toBe(join(import.meta.dir, '..', 'session-mod'))
+    expect(existsSync(effortFile(p, key))).toBe(false) // not sent yet
+    const b = await connect(hub, tmux, key, 1)
+    await until('the task', () => b.got.length === 1)
+    expect(readFileSync(effortFile(p, key), 'utf8')).toBe('high\n')
+
+    // A follow-up on the same work names none: it stays.
+    const more = JSON.parse(await handleCall(hub, rkey, 'delegate', { worker_id: key, task: 'and the logout bug' }))
+    expect(more).toMatchObject({ state: 'delivered', effort: 'high' })
+    expect(hub.effortOf(key)).toBe('high')
+    expect(await handleCall(hub, rkey, 'list_workers', {})).toContain(`${key} "Fixer" — busy, effort high`)
+
+    // Another thread's quick task waits behind it, and changes the level only once it is sent.
+    hub.store.insertThread({ id: 'T3', channelId: 'C1', workspace: 'demo', routerKey: 'r-t3', label: 'thread three', cursor: 0, createdAt: 0 })
+    const quick = await hub.enqueue(() => delegate(hub, { thread: hub.store.thread('T3')!, workerKey: key, task: 'what is the default port?', messageIds: [], effort: 'low' }))
+    expect(quick).toMatchObject({ state: 'queued', effort: 'low' })
+    expect(hub.effortOf(key)).toBe('high')
+    await hook(hub, key, 'Stop')
+    await until('the quick task', () => b.got.length === 3)
+    expect(b.got[2]!.content).toContain('what is the default port?')
+    expect(hub.effortOf(key)).toBe('low')
+    expect(hub.store.task(quick.task_id)!.effort).toBe('low')
+  }, T)
+
+  test('a level that is none of them is refused, and nothing is queued', async () => {
+    const { hub, w } = setup()
+    const rkey = hub.createRouter({ threadId: 'T2', channelId: 'C1', workspace: w, label: 'thread two' })
+    await expect(handleCall(hub, rkey, 'delegate', { new_worker: { title: 'Fixer', summary: 'x' }, task: 'x', effort: 'extreme' }))
+      .rejects.toThrow('effort must be one of low, medium, high, xhigh, max')
+    expect(hub.store.routerWorkers('demo')).toEqual([])
+  })
+
+  test('a worker never given one runs at its own; a cleanup job goes back to it', async () => {
+    const { hub, tmux, w, p } = setup()
+    const { key } = worker(hub, w)
+    await hub.enqueue(() => hub.ensureStarted(key))
+    const b = await connect(hub, tmux, key, 1)
+    await until('the task', () => b.got.length === 1)
+    expect(existsSync(effortFile(p, key))).toBe(false)
+    const res = await hub.enqueue(() => delegate(hub, { thread: hub.store.thread('T1')!, workerKey: key, task: 'more', messageIds: [] }))
+    expect(res.effort).toBe('default')
+    await hook(hub, key, 'Stop')
+    hub.setEffort(key, 'max')
+    hub.store.patchSession(key, { lastActiveAt: Date.now() - 30 * 3_600_000 })
+    await hub.enqueue(() => hub.cleanupDue(Date.now()))
+    await until('the cleanup job', () => b.got.some(m => m.meta.kind === 'cleanup'))
+    expect(hub.effortOf(key)).toBeUndefined()
+  }, T)
+})
+
 describe('a workspace folder Claude Code doesn\'t trust (it was moved, say)', () => {
   const asks = (folder: string) => [' Adding a new directory:', '', ` ${folder}`, '', " This session hasn't worked here before.", '', ' ❯ No, exit', '   Yes, add it', '', ' Enter to confirm · Esc to cancel'].join('\n')
 

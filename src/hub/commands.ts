@@ -39,7 +39,7 @@ function sessionLine(hub: Hub, key: string): string {
     !live && s.closeReason ? `(${s.closeReason}${s.closedAt ? `, ${fmtAge(Date.now() - s.closedAt)} ago` : ''})` : '',
     hub.queued(key) ? `${hub.queued(key)} queued` : '',
   ].filter(Boolean).join(' ')
-  return `${s.role === 'router' ? '🧭' : '🛠'} \`${key}\` **${hub.label(key)}** — ${s.status}${live ? `, active ${fmtAge(Date.now() - s.lastActiveAt)} ago` : ''} ${extra} · ${s.model}`.trim()
+  return `${s.role === 'router' ? '🧭' : '🛠'} \`${key}\` **${hub.label(key)}** — ${s.status}${live ? `, active ${fmtAge(Date.now() - s.lastActiveAt)} ago` : ''} ${extra} · ${s.model}${s.role === 'worker' ? ` (effort ${hub.effortOf(key) ?? 'default'})` : ''}`.trim()
 }
 
 export async function runCommand(hub: Hub, a: Extract<InboundAction, { kind: 'command' }>, post: MMPost): Promise<void> {

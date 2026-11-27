@@ -19,6 +19,7 @@ import { checkBotMentions } from './bots'
 import { newThread } from './newthread'
 import { addRepoTool } from './addrepo'
 import { isDraft, type ThreadRow } from './store'
+import { EFFORTS, isEffort, type Effort } from '../shared/ipc'
 import { effective, prepareWorktree } from './workspaces'
 import { listChannels, ownThread, postIdOf, readChannel, readOtherThread, searchMessages, threadText } from './explore'
 
@@ -232,7 +233,7 @@ function listWorkers(hub: Hub, key: string): string {
     const repos = Object.entries(w.repos).map(([n, t]) => `${n}${t.branch ? `@${t.branch}` : ''}`).join(', ') || 'none'
     const threads = w.threads.map(id => (id === thread.id ? `${id} (this thread)` : id)).join(', ') || 'none'
     return [
-      `- ${w.key} "${w.title}" — ${s?.status ?? '?'}${queued ? `, ${queued} queued` : ''}, last active ${s ? fmtAge(now - s.lastActiveAt) : '?'} ago`,
+      `- ${w.key} "${w.title}" — ${s?.status ?? '?'}${queued ? `, ${queued} queued` : ''}, effort ${hub.effortOf(w.key) ?? 'default'}, last active ${s ? fmtAge(now - s.lastActiveAt) : '?'} ago`,
       `  summary: ${w.summary || '(none)'}`,
       `  repos: ${repos}; threads: ${threads}`,
       w.lastPost ? `  last report: ${w.lastPost.replace(/\s+/g, ' ').slice(0, 160)}` : '',
@@ -242,15 +243,17 @@ function listWorkers(hub: Hub, key: string): string {
   return `Workers in workspace "${thread.workspace}" (${workers.length}/${cfg.maxWorkersPerWorkspace}):\n${lines.join('\n')}`
 }
 
-export type DelegateResult = { worker_id: string; task_id: number; state: 'delivered' | 'queued' | 'starting' | 'resuming' | 'waiting_for_slot' | 'failed'; position?: number }
+/** `effort`: what the task runs at ('default': the worker's own level, none having been chosen). */
+export type DelegateResult = { worker_id: string; task_id: number; state: 'delivered' | 'queued' | 'starting' | 'resuming' | 'waiting_for_slot' | 'failed'; position?: number; effort?: Effort | 'default' }
 
 /** Hand a task to a worker (existing or new). Call on the chain. */
 export async function delegate(
   hub: Hub,
-  o: { thread: ThreadRow; workerKey?: string; newWorker?: { title: string; summary: string }; task: string; messageIds: string[] },
+  o: { thread: ThreadRow; workerKey?: string; newWorker?: { title: string; summary: string }; task: string; messageIds: string[]; effort?: string },
 ): Promise<DelegateResult> {
   const w = hub.ws(o.thread.workspace)
   if (!w) throw new ToolError(`workspace ${o.thread.workspace} not found`)
+  if (o.effort !== undefined && !isEffort(o.effort)) throw new ToolError(`effort must be one of ${EFFORTS.join(', ')}`)
   let key: string
   if (o.workerKey) {
     const existing = hub.store.worker(o.workerKey)
@@ -287,7 +290,8 @@ export async function delegate(
     quotes.length ? `\nThe person's own words:\n${quotes.join('\n\n')}` : '',
   ].join('\n')
 
-  return queueTask(hub, key, o.thread, text)
+  const res = await queueTask(hub, key, o.thread, text, o.effort)
+  return { ...res, effort: o.effort ?? hub.effortOf(key) ?? 'default' }
 }
 
 /**
@@ -295,8 +299,8 @@ export async function delegate(
  * worker is free or already working for that thread, else after its current
  * work; a stopped worker is started. Call on the chain.
  */
-export async function queueTask(hub: Hub, key: string, thread: ThreadRow, text: string): Promise<DelegateResult> {
-  const taskId = hub.store.insertTask({ workerKey: key, threadId: thread.id, channelId: thread.channelId, text, state: 'queued', createdAt: Date.now() })
+export async function queueTask(hub: Hub, key: string, thread: ThreadRow, text: string, effort?: Effort): Promise<DelegateResult> {
+  const taskId = hub.store.insertTask({ workerKey: key, threadId: thread.id, channelId: thread.channelId, text, state: 'queued', createdAt: Date.now(), ...(effort ? { effort } : {}) })
   const task = hub.store.task(taskId)!
   const l = hub.liveOf(key)
   const inflight = hub.store.tasksFor(key, ['delivered'])
@@ -432,6 +436,7 @@ async function callTool(hub: Hub, key: string, tool: string, a: Args): Promise<s
         newWorker: nw && typeof nw === 'object' ? { title: String(nw.title ?? ''), summary: String(nw.summary ?? '') } : undefined,
         task: str(a, 'task')!,
         messageIds: strList(a, 'message_ids'),
+        effort: str(a, 'effort', false),
       }))
       return JSON.stringify(res)
     }

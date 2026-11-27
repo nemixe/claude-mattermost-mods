@@ -6,9 +6,9 @@
  */
 
 import { randomUUID } from 'crypto'
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from 'fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { join } from 'path'
-import type { ClientMsg, HookEvent, HubMsg, Role } from '../shared/ipc'
+import { isEffort, type ClientMsg, type Effort, type HookEvent, type HubMsg, type Role } from '../shared/ipc'
 import type { Paths } from '../shared/paths'
 import { ROOT } from '../shared/paths'
 import type { HubSnapshot, CloseReason, ProviderLink, WorkspaceProvider } from '../shared/snapshot'
@@ -36,7 +36,7 @@ import {
   providerChain, providerFault, readSecret, redact, resetTime, startupProblem, syncTranscript, unusableReason,
   type Choice, type FaultKind, type Health, type ProviderDef,
 } from './providers'
-import { addedDirs, claudeArgs, tmuxName, transcriptPath, wrapArgv, writeProviderEnv, writeSessionFiles } from './spawn'
+import { addedDirs, claudeArgs, sessionFiles, tmuxName, transcriptPath, wrapArgv, writeProviderEnv, writeSessionFiles } from './spawn'
 import { askedFolder, shepherd, waitForCalm } from './shepherd'
 import { buildSnapshot, StatusWriter } from './status'
 import { isDraft, Store, type MessageRow, type SessionRow, type TaskRow, type ThreadRow, type WorkerRow } from './store'
@@ -739,6 +739,7 @@ export class Hub {
       extraArgs: row.role === 'router' ? this.cfg.routerArgs : this.cfg.workerArgs,
       files,
       autocompact: row.role === 'router' ? this.cfg.routerAutocompact : undefined,
+      ...(row.role === 'worker' ? { workerMod: join(ROOT, 'session-mod') } : {}),
     })
     const folders = addedDirs(argv, row.cwd)
     // A provider's env (secrets included) goes through a 0600 file the launch sources and deletes — never argv.
@@ -859,6 +860,7 @@ export class Hub {
     l.conn!.send({ t: 'inbound', content: m.content, meta: m.meta })
     l.lastDeliveredAt = Date.now()
     l.cleaning = m.meta.kind === 'cleanup'
+    if (l.cleaning) this.setEffort(key, undefined) // its default: the job names none, and the next task starts from there
     l.unposted = !l.cleaning
     this.patch(key, { status: 'busy', busySince: this.store.session(key)?.busySince ?? Date.now(), lastActiveAt: Date.now() })
     if (key.startsWith('r-') && m.meta.chat_id && m.meta.thread_id && !isDraft(m.meta.thread_id)) this.mm.typing(m.meta.chat_id, m.meta.thread_id)
@@ -941,10 +943,38 @@ export class Hub {
     const content = `Task #${task.id} from thread ${thread ? this.permalink(thread.id) : task.threadId}:\n\n${task.text}${again}`
     this.store.setTaskState(task.id, 'delivered')
     this.store.patchWorker(key, { activeThread: task.threadId, activeTask: task.id })
+    // Read by session-mod at each model request: the level stays for later tasks that name none.
+    if (task.effort && task.effort !== this.effortOf(key)) {
+      this.setEffort(key, task.effort)
+      log('lifecycle', `${key}: task #${task.id} at ${task.effort} effort`)
+    }
     this.send(key, {
       content,
       meta: { chat_id: task.channelId, thread_id: task.threadId, task_id: String(task.id), workspace: this.store.session(key)?.workspace ?? '' },
     })
+  }
+
+  /** The effort a worker's model requests go at (session-mod reads it); undefined: its own default. */
+  effortOf(key: string): Effort | undefined {
+    try {
+      const level = readFileSync(sessionFiles(this.p, key).effort, 'utf8').trim()
+      return isEffort(level) ? level : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  setEffort(key: string, level: Effort | undefined): void {
+    const f = sessionFiles(this.p, key)
+    try {
+      if (level === undefined) rmSync(f.effort, { force: true })
+      else {
+        mkdirSync(f.dir, { recursive: true, mode: 0o700 })
+        writeFileSync(f.effort, `${level}\n`)
+      }
+    } catch (err) {
+      log('lifecycle', `${key}: effort ${level ?? 'default'} not set: ${errMsg(err)}`)
+    }
   }
 
   /** Close a session gracefully (/exit, then kill). Call on the chain. */

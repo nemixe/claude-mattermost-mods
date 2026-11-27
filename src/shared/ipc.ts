@@ -8,6 +8,11 @@ export const PROTO = 1
 
 export type Role = 'router' | 'worker'
 
+/** How hard a worker's model thinks about a task (Claude Code's effort levels), lowest first. */
+export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
+export type Effort = (typeof EFFORTS)[number]
+export const isEffort = (s: unknown): s is Effort => typeof s === 'string' && (EFFORTS as readonly string[]).includes(s)
+
 export type HookEvent = 'SessionStart' | 'Stop' | 'StopFailure' | 'SessionEnd' | 'PreToolUse'
 
 export type ClientMsg =

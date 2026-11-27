@@ -16,11 +16,12 @@ export function shq(s: string): string {
   return /^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`
 }
 
-export type SessionFiles = { dir: string; mcp: string; settings: string; prompt: string; providerEnv: string }
+/** `effort`: the level a worker's requests go at, read by session-mod (its path is fixed there too). */
+export type SessionFiles = { dir: string; mcp: string; settings: string; prompt: string; providerEnv: string; effort: string }
 
 export function sessionFiles(p: Paths, key: string): SessionFiles {
   const dir = join(p.sessions, key)
-  return { dir, mcp: join(dir, 'mcp.json'), settings: join(dir, 'settings.json'), prompt: join(dir, 'prompt.md'), providerEnv: join(dir, 'provider.env') }
+  return { dir, mcp: join(dir, 'mcp.json'), settings: join(dir, 'settings.json'), prompt: join(dir, 'prompt.md'), providerEnv: join(dir, 'provider.env'), effort: join(dir, 'effort') }
 }
 
 /**
@@ -157,13 +158,15 @@ export type LaunchSpec = {
   extraArgs: string[]
   files: SessionFiles
   autocompact?: number
+  /** Workers: the folder of the mod that sets each task's effort (session-mod/). */
+  workerMod?: string
 }
 
 export function claudeArgs(s: LaunchSpec): string[] {
   const roleArgs = s.role === 'router'
     ? ['--tools', 'Read,Grep,Glob', '--permission-mode', 'dontAsk', '--allowedTools', 'mcp__mmhub',
         ...(s.autocompact ? ['--autocompact', String(s.autocompact)] : [])]
-    : ['--permission-mode', s.permissionMode, '--allowedTools', 'mcp__mmhub']
+    : ['--permission-mode', s.permissionMode, '--allowedTools', 'mcp__mmhub', ...(s.workerMod ? ['--plugin-dir', s.workerMod] : [])]
   return [
     s.claudeBin,
     ...(s.resume ? ['--resume', s.sessionId] : ['--session-id', s.sessionId]),
